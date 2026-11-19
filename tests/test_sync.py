@@ -20,7 +20,7 @@ class FakeZoho:
     def __init__(self, live=True):
         self.live = live
         self.writes = []
-        self.db = {m: {} for m in ("Accounts", "Contacts", "Products", "Deals", "Sales_Orders")}
+        self.db = {m: {} for m in ("Accounts", "Contacts", "Products", "Deals", "Sales_Orders", "Notes")}
 
     def seed(self, module, record):
         rid = str(next(_ids))
@@ -302,11 +302,71 @@ class SyncTests(unittest.TestCase):
         names = [p["Product_Name"] for p in z.db["Products"].values()]
         self.assertEqual(len(names), len(set(n.lower() for n in names)), names)
 
-    def test_draft_orders_skipped(self):
+    def test_draft_order_becomes_open_deal_without_sales_order(self):
         z, sb = setup()
         sb.orders[0]["status"] = "DRAFT"
         run(z, sb)
-        self.assertEqual(len(z.db["Deals"]), 0)
+        self.assertEqual(next(iter(z.db["Deals"].values()))["Stage"], "open")
+        self.assertEqual(len(z.db["Sales_Orders"]), 0)
+
+    def test_history_and_payments_become_notes_once(self):
+        z, sb = setup()
+        o = sb.orders[0]
+        o["history"] = [{"id": "h1", "occurredAt": "2026-11-18T10:00:00Z", "eventJson": '{"type": "ORDER_SUBMITTED"}'},
+                        {"id": "h2", "occurredAt": "2026-11-18T11:00:00Z", "eventJson": '{"type": "LINE_EDITED", "qty": 4}'}]
+        o["payments"] = [{"id": "p1", "amountDollars": 100.0, "method": "ACH", "paymentDate": "2026-11-19T00:00:00Z"}]
+        run(z, sb)
+        titles = sorted(n["Note_Title"] for n in z.db["Notes"].values())
+        self.assertEqual(len(titles), 3, titles)
+        self.assertTrue(any("Order Submitted" in t for t in titles))
+        self.assertTrue(any("Payment: $100.00" in t for t in titles))
+        run(z, sb)  # no new activity -> no new notes
+        self.assertEqual(len(z.db["Notes"]), 3)
+        o["history"].append({"id": "h3", "occurredAt": "2026-11-19T09:00:00Z", "eventJson": '{"type": "ORDER_SHIPPED"}'})
+        run(z, sb)
+        self.assertEqual(len(z.db["Notes"]), 4)
+
+    def test_order_dates_and_balance_on_deal_without_repeat_updates(self):
+        z, sb = setup()
+        sb.orders[0].update(status="SHIPPED", shippedAt="2026-11-19T08:30:00.123Z", balanceDueDollars=150.0,
+                            isPastDue=False, daysPastDue=0)
+        run(z, sb)
+        deal = next(iter(z.db["Deals"].values()))
+        self.assertEqual(deal["Superbud_Shipped_At"], "2026-11-19T08:30:00+00:00")
+        self.assertEqual(deal["Superbud_Balance_Due"], 150.0)
+        # Zoho hands datetimes back in local time; that must not count as a change
+        deal["Superbud_Shipped_At"] = "2026-11-19T14:00:00+05:30"
+        z.writes.clear()
+        run(z, sb)
+        self.assertFalse([w for w in z.writes if w[1] == "Deals"], z.writes)
+
+    def test_contact_details_follow_superbud_and_placed_by_added(self):
+        z, sb = setup()
+        run(z, sb)
+        o = sb.orders[0]
+        o["buyerRep"]["phoneNumber"] = "999"
+        o["placedByUser"] = {"id": "B7", "firstName": "Other", "lastName": "Buyer", "email": "other@example.com"}
+        run(z, sb)
+        buyer = next(c for c in z.db["Contacts"].values() if c.get("Superbud_Buyer_User_ID") == "B1")
+        self.assertEqual(buyer["Phone"], "999")
+        self.assertTrue(any(c.get("Email") == "other@example.com" for c in z.db["Contacts"].values()))
+
+    def test_sales_rep_never_becomes_contact(self):
+        z, sb = setup()
+        sb.orders[0]["placedByUser"] = {"id": "r1", "firstName": "Rep", "lastName": "Person", "email": "rep@example.com"}
+        run(z, sb)
+        self.assertFalse(any(c.get("Email") == "rep@example.com" for c in z.db["Contacts"].values()))
+
+    def test_company_address_change_and_deletion_reach_dispensary(self):
+        z, sb = setup()
+        run(z, sb)
+        sb.locations[0]["address"]["line1"] = "99 New Road"
+        sb.locations[0]["customer"]["deletedAt"] = "2026-11-19T00:00:00Z"
+        run(z, sb)
+        acc = next(a for a in z.db["Accounts"].values() if a.get("Superbud_Customer_Location_ID") == "L1")
+        self.assertEqual(acc["Shipping_Street"], "99 New Road")
+        self.assertEqual(acc["Superbud_Sync_Status"], "Deleted in Superbud")
+        self.assertTrue(acc["Account_Name"].startswith("Maple Leaf Co - AU"))  # name never changed
 
 
 class MappingTests(unittest.TestCase):
