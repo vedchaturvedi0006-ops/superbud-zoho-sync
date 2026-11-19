@@ -1,0 +1,46 @@
+name: Superbud to Zoho sync
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"      # every 15 minutes (GitHub may start a few minutes late)
+  workflow_dispatch:             # "Run workflow" button for a manual run
+    inputs:
+      full_pass:
+        description: "Also run license matching / create new Dispensaries now"
+        type: boolean
+        default: false
+
+concurrency:
+  group: superbud-zoho-sync      # never two runs at the same time
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run sync
+        env:
+          # Keys: Settings -> Secrets and variables -> Actions -> Secrets
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          SUPERBUD_API_KEY: ${{ secrets.SUPERBUD_API_KEY }}
+          # Settings: Settings -> Secrets and variables -> Actions -> Variables
+          LIVE: ${{ vars.LIVE || 'false' }}
+          CREATE_NEW_DISPENSARIES: ${{ vars.CREATE_NEW_DISPENSARIES || 'on_activity' }}
+          CREATE_NEW_PRODUCTS: ${{ vars.CREATE_NEW_PRODUCTS || 'true' }}
+          ORDER_LOOKBACK_DAYS: ${{ vars.ORDER_LOOKBACK_DAYS || '120' }}
+          PRODUCT_PRICE_MODE: ${{ vars.PRODUCT_PRICE_MODE || 'unit' }}
+          FORCE_FULL_PASS: ${{ inputs.full_pass && 'true' || 'false' }}
+          QUIET_OUTPUT: "true"       # public logs: counts only, no names or emails
+        run: python -m sbsync run
