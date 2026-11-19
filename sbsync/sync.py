@@ -4,6 +4,7 @@ stock and orders; Zoho keeps its own names, licenses and sales data.
 Duplicate protection: every Zoho record stores its Superbud ID. Each run reads
 those IDs from Zoho first, so a record is only created when no match exists."""
 import datetime as dt
+import json
 from collections import Counter, defaultdict
 
 from . import config, mapping
@@ -31,6 +32,23 @@ class Report:
         return "\n".join(head + ["SUMMARY"] + summary + ["", "DETAILS"] + self.lines)
 
 
+def _as_utc(value):
+    """ISO datetime string -> aware UTC datetime, else None (Zoho returns local offsets)."""
+    if not isinstance(value, str) or len(value) < 19 or value[10] != "T":
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(dt.timezone.utc) if parsed.tzinfo else None
+
+
+def zoho_dt(value):
+    """Superbud timestamp -> Zoho datetime format (no milliseconds, explicit offset)."""
+    t = _as_utc(value)
+    return t.replace(microsecond=0).isoformat() if t else None
+
+
 def _changed(current, wanted):
     """Only the fields whose value actually differs."""
     out = {}
@@ -42,7 +60,11 @@ def _changed(current, wanted):
             value_cmp = value["id"]
         else:
             value_cmp = value
-        if isinstance(value_cmp, (int, float)) and not isinstance(value_cmp, bool) \
+        t_want, t_have = _as_utc(value_cmp), _as_utc(have)
+        if t_want and t_have:
+            if abs((t_want - t_have).total_seconds()) < 1:
+                continue
+        elif isinstance(value_cmp, (int, float)) and not isinstance(value_cmp, bool) \
                 and isinstance(have, (int, float)) and not isinstance(have, bool):
             if abs(have - value_cmp) < 0.005:
                 continue
@@ -68,14 +90,18 @@ class Sync:
             "id, Account_Name, License_number, Superbud_Customer_ID, Superbud_Customer_Location_ID, "
             "Superbud_Location_Name, Superbud_Sync_Status, Billing_Street, Billing_City, Billing_State, "
             "Billing_Code, Billing_Country, Shipping_Street, Shipping_City, Shipping_State, Shipping_Code, "
-            "Shipping_Country", "Accounts")
+            "Shipping_Country, Website, Owner", "Accounts")
         self.contacts = z.coql_all("id, First_Name, Last_Name, Email, Phone, Superbud_Buyer_User_ID, Account_Name",
                                    "Contacts")
         self.products = z.coql_all("id, Product_Name, Product_Code, Product_Category, Sub_Category, Flavour, "
                                    "Unit_Price, Qty_in_Stock, Brand, Product_Active, Superbud_Product_ID, "
                                    "Superbud_Product_Option_ID", "Products")
         self.deals = z.coql_all("id, Deal_Name, Stage, Amount, Closing_Date, Account_Name, Contact_Name, "
-                                "Superbud_Order_ID, Superbud_Order_Number, Superbud_Order_Status, Sync_Source",
+                                "Superbud_Order_ID, Superbud_Order_Number, Superbud_Order_Status, Sync_Source, "
+                                "Superbud_Submitted_At, Superbud_Approved_At, Superbud_Shipped_At, "
+                                "Superbud_Delivered_At, Superbud_Cancelled_At, Superbud_Fully_Paid_At, "
+                                "Superbud_Balance_Due, Superbud_Past_Due, Superbud_Days_Past_Due, "
+                                "Superbud_History_Count, Superbud_Payment_Count",
                                 "Deals", where="Superbud_Order_ID is not null")
         self.sales_orders = z.coql_all("id, Subject, Status, Superbud_Order_ID, Superbud_Order_Version, Deal_Name",
                                        "Sales_Orders", where="Superbud_Order_ID is not null")
@@ -108,6 +134,7 @@ class Sync:
     # =========================================================== locations ==
     def sync_locations(self):
         locations = self.sb.customer_locations()
+        self.internal_ids |= {(l.get("assignedSalesRep") or {}).get("id") for l in locations} - {None}
         per_customer = Counter((l.get("customer") or {}).get("id") for l in locations)
         sb_ids = {l["id"] for l in locations}
         mode = config.CREATE_NEW_DISPENSARIES()
@@ -187,11 +214,19 @@ class Sync:
                     creates.append((loc, record))
                     continue
 
-            # Existing Dispensary: store IDs; fill empty address fields only (Zoho names stay as they are)
+            # Existing Dispensary: Zoho name and license stay as they are. Superbud is the
+            # source for addresses, the assigned sales rep and the website.
             for prefix, addr in (("Billing", loc.get("businessAddress")), ("Shipping", loc.get("address"))):
-                for key, value in mapping.zoho_address(addr, prefix).items():
-                    if not acc.get(key):
-                        wanted[key] = value
+                wanted.update(mapping.zoho_address(addr, prefix))
+            if customer.get("website") and not acc.get("Website"):
+                wanted["Website"] = customer["website"]
+            owner = self.owner(loc.get("assignedSalesRep"))
+            if owner:
+                wanted["Owner"] = owner
+            if customer.get("deletedAt"):
+                wanted["Superbud_Sync_Status"] = "Deleted in Superbud"
+            elif acc.get("Superbud_Sync_Status") == "Deleted in Superbud":
+                wanted["Superbud_Sync_Status"] = "Matched"
             diff = _changed(acc, wanted)
             if diff:
                 updates.append((acc, loc, dict(diff, id=acc["id"])))
@@ -358,6 +393,8 @@ class Sync:
         for o in self.skipped_dead:
             orders.pop(o["id"])
         self.orders = orders
+        # Distributor-side people (our sales reps) are never turned into customer contacts
+        self.internal_ids |= {(o.get("salesRep") or {}).get("id") for o in orders.values()} - {None}
         self.active_locations = {
             (o.get("customerLocation") or {}).get("id") for o in orders.values()
             if o.get("status") != "DRAFT" or config.SYNC_DRAFT_ORDERS() or o["id"] in self.deal_by_order
@@ -381,7 +418,13 @@ class Sync:
                 continue
             try:
                 contact_id = self.ensure_contact(order.get("buyerRep"), account, order)
-                deal_id = self.upsert_deal(order, account, contact_id)
+                placed = order.get("placedByUser") or {}
+                placed_id = None
+                if placed.get("id") and placed["id"] != (order.get("buyerRep") or {}).get("id"):
+                    placed_id = self.ensure_contact(placed, account, order)
+                deal_id = self.upsert_deal(order, account, contact_id or placed_id)
+                if deal_id:
+                    self.sync_activity(order, deal_id)
                 won = mapping.deal_stage(order.get("status"), order.get("approvalState")) == "Closed Won"
                 if (deal_id and won) or order["id"] in self.so_by_order:
                     self.upsert_sales_order(order, account, contact_id, deal_id)
@@ -392,15 +435,17 @@ class Sync:
     def ensure_contact(self, buyer, account, order):
         if not buyer or not buyer.get("id"):
             return None
-        # A buyer who is also our own sales rep is internal, not a customer contact
-        if (order.get("salesRep") or {}).get("id") == buyer["id"]:
+        # Our own sales reps / staff are internal, not customer contacts
+        if buyer["id"] in self.internal_ids or (order.get("salesRep") or {}).get("id") == buyer["id"]:
             return None
         email = (buyer.get("email") or "").lower()
-        contact = self.contact_by_sb.get(buyer["id"]) or (self.contact_by_email.get(email) if email else None)
+        linked = self.contact_by_sb.get(buyer["id"])
+        contact = linked or (self.contact_by_email.get(email) if email else None)
         wanted = {"Superbud_Buyer_User_ID": buyer["id"]}
         for key, value in (("First_Name", buyer.get("firstName")), ("Last_Name", buyer.get("lastName")),
                            ("Email", buyer.get("email")), ("Phone", buyer.get("phoneNumber"))):
-            if value and (contact is None or not contact.get(key)):
+            # Linked contacts follow Superbud; a first-time email match only fills empty fields
+            if value and (contact is None or linked is not None or not contact.get(key)):
                 wanted[key] = value
         name = f"{buyer.get('firstName') or ''} {buyer.get('lastName') or ''}".strip() or email
         if contact is None:
@@ -452,6 +497,15 @@ class Sync:
             "Superbud_Order_Number": str(order.get("orderNumber")),
             "Superbud_Order_Status": order.get("status"),
             "Sync_Source": "Superbud",
+            "Superbud_Submitted_At": zoho_dt(order.get("submittedAt")),
+            "Superbud_Approved_At": zoho_dt(order.get("approvedAt")),
+            "Superbud_Shipped_At": zoho_dt(order.get("shippedAt")),
+            "Superbud_Delivered_At": zoho_dt(order.get("deliveredAt")),
+            "Superbud_Cancelled_At": zoho_dt(order.get("cancelledAt")),
+            "Superbud_Fully_Paid_At": zoho_dt(order.get("fullyPaidAt")),
+            "Superbud_Balance_Due": order.get("balanceDueDollars"),
+            "Superbud_Past_Due": bool(order.get("isPastDue")),
+            "Superbud_Days_Past_Due": order.get("daysPastDue"),
         }
         if contact_id:
             wanted["Contact_Name"] = {"id": contact_id}
@@ -482,6 +536,57 @@ class Sync:
         else:
             self.report.add("Deal", "unchanged", deal.get("Deal_Name"))
         return deal["id"]
+
+    # -- activity history + payments as Notes on the Deal --
+    @staticmethod
+    def _describe_event(entry):
+        raw = entry.get("eventJson") or ""
+        try:
+            event = json.loads(raw)
+        except (TypeError, ValueError):
+            event = None
+        if isinstance(event, dict):
+            kind = event.get("type") or event.get("__typename") or event.get("kind") or event.get("event") or "Activity"
+            detail = {k: v for k, v in event.items() if k not in ("type", "__typename", "kind", "event")}
+            body = json.dumps(detail, indent=1, default=str) if detail else ""
+        else:
+            kind, body = "Activity", raw
+        return str(kind).replace("_", " ").title(), body[:3000]
+
+    def sync_activity(self, order, deal_id):
+        deal = self.deal_by_order.get(order["id"]) or {}
+        label = f"Order #{order.get('orderNumber')}"
+        notes = []
+        history = sorted(order.get("history") or [], key=lambda e: e.get("occurredAt") or e.get("createdAt") or "")
+        done_h = int(deal.get("Superbud_History_Count") or 0)
+        for entry in history[done_h:]:
+            kind, body = self._describe_event(entry)
+            when = (entry.get("occurredAt") or entry.get("createdAt") or "")[:16].replace("T", " ")
+            notes.append({"Note_Title": f"Superbud: {kind} ({when} UTC)", "Note_Content": body or kind,
+                          "Parent_Id": {"module": {"api_name": "Deals"}, "id": deal_id}})
+        payments = sorted(order.get("payments") or [], key=lambda p: p.get("paymentDate") or "")
+        done_p = int(deal.get("Superbud_Payment_Count") or 0)
+        for pay in payments[done_p:]:
+            amount = pay.get("amountDollars") or 0
+            kind = "Refund" if amount < 0 else "Payment"
+            parts = [f"Amount: ${abs(amount):,.2f}", f"Method: {pay.get('method') or '-'}",
+                     f"Date: {(pay.get('paymentDate') or '')[:10]}"]
+            if pay.get("referenceNumber"):
+                parts.append(f"Reference: {pay['referenceNumber']}")
+            if pay.get("notes"):
+                parts.append(f"Notes: {pay['notes']}")
+            notes.append({"Note_Title": f"Superbud {kind}: ${abs(amount):,.2f}", "Note_Content": "\n".join(parts),
+                          "Parent_Id": {"module": {"api_name": "Deals"}, "id": deal_id}})
+        if not notes:
+            return
+        results = self.z.create("Notes", notes)
+        if not all(r.get("status") in ("success", "dry_run") for r in results):
+            self.report.add("Activity", "error", f"{label}: some notes failed")
+            return
+        counts = {"id": deal_id, "Superbud_History_Count": len(history), "Superbud_Payment_Count": len(payments)}
+        self.z.update("Deals", [counts])
+        deal.update(counts)
+        self.report.add("Activity", "added", f"{label}: {len(notes)} note(s) (history/payments)")
 
     # -- sales orders --
     def _ordered_items(self, order, existing_rows):
@@ -567,6 +672,7 @@ class Sync:
     def run(self):
         self.load_zoho()
         self.orders, self.active_locations, self.skipped_dead = {}, set(), []
+        self.internal_ids = set()
         for step in (self.fetch_orders, self.sync_locations, self.sync_products, self.sync_orders):
             try:
                 step()

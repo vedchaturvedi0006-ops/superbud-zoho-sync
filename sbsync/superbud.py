@@ -17,7 +17,7 @@ def location_fields(distributor_id):
     # assignedSalesRep needs the distributor id as an argument
     return f"""
   id name
-  customer {{ id name deletedAt }}
+  customer {{ id name website deletedAt }}
   address {{ {ADDRESS} }}
   businessAddress {{ {ADDRESS} }}
   assignedSalesRep(distributorId: "{distributor_id}") {{ id email }}
@@ -32,13 +32,20 @@ PRODUCT_FIELDS = """
   }
 """
 
+PERSON = "id firstName lastName email phoneNumber"
+
 ORDER_FIELDS = f"""
   id orderNumber status approvalState version createdAt approvedAt dueDate
+  submittedAt shippedAt deliveredAt cancelledAt fullyPaidAt
+  balanceDueDollars isUnpaid isPastDue daysPastDue
   subtotal total shippingFee localTax stateTax credits manualAdjustments
   customer {{ id name }}
   customerLocation {{ id name }}
-  buyerRep {{ id firstName lastName email phoneNumber }}
+  buyerRep {{ {PERSON} }}
+  placedByUser {{ {PERSON} }}
   salesRep {{ id email }}
+  history {{ id occurredAt eventJson }}
+  payments {{ id amountDollars method paymentDate referenceNumber notes }}
   shippingAddress {{ {ADDRESS} }}
   lineItems {{
     id quantity basePriceDollars priceDollars discountDollars totalDollars

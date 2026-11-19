@@ -76,7 +76,7 @@ ORDER_LOOKBACK_DAYS = lambda: int(get("ORDER_LOOKBACK_DAYS", "120"))
 # "false"       = never create, only link existing Dispensaries
 CREATE_NEW_DISPENSARIES = lambda: (get("CREATE_NEW_DISPENSARIES", "on_activity") or "on_activity").strip().lower()
 CREATE_NEW_PRODUCTS = lambda: flag("CREATE_NEW_PRODUCTS", True)
-SYNC_DRAFT_ORDERS = lambda: flag("SYNC_DRAFT_ORDERS", False)
+SYNC_DRAFT_ORDERS = lambda: flag("SYNC_DRAFT_ORDERS", True)
 PRODUCT_PRICE_MODE = lambda: get("PRODUCT_PRICE_MODE", "unit")  # "unit" (price / pack size) or "pack"
 PUSH_LOCATIONS_TO_SUPERBUD = lambda: flag("PUSH_LOCATIONS_TO_SUPERBUD", False)
 # On GitHub (public logs) print counts only - no names, emails or error details
