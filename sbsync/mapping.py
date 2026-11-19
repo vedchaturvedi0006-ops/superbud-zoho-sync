@@ -33,19 +33,64 @@ def deal_name(order):
 
 
 # ------------------------------------------------------------- addresses -----
-def zoho_address(address, prefix):
-    """Superbud Address -> Zoho Billing_/Shipping_ fields."""
+US_STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado",
+    "CT": "Connecticut", "DE": "Delaware", "DC": "District of Columbia", "FL": "Florida", "GA": "Georgia",
+    "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts",
+    "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
+    "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico",
+    "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
+    "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming", "PR": "Puerto Rico",
+}
+COUNTRIES = {"US": "United States", "USA": "United States", "U.S.": "United States",
+             "UNITED STATES OF AMERICA": "United States", "CA": "Canada", "CAN": "Canada"}
+
+
+def state_name(value):
+    """Zoho's State dropdown uses full names ("Michigan"), Superbud sends codes ("MI")."""
+    if not value:
+        return value
+    return US_STATES.get(value.strip().upper(), value.strip())
+
+
+def country_name(value):
+    if not value:
+        return value
+    return COUNTRIES.get(value.strip().upper(), value.strip())
+
+
+def zoho_address(address, prefix, zip_field="Code"):
+    """Superbud Address -> Zoho <prefix>_Street/_City/_State/_Code/_Country (+ apartment line)."""
     if not address:
         return {}
-    street = ", ".join(p for p in (address.get("line1"), address.get("line2")) if p)
     values = {
-        f"{prefix}_Street": street,
+        f"{prefix}_Street": address.get("line1"),
+        f"{prefix}_Flat_House_No_Building_Apartment_Name": address.get("line2"),
         f"{prefix}_City": address.get("city"),
-        f"{prefix}_State": address.get("state"),
-        f"{prefix}_Code": address.get("zip"),
-        f"{prefix}_Country": address.get("country"),
+        f"{prefix}_State": state_name(address.get("state")),
+        f"{prefix}_{zip_field}": address.get("zip"),
+        f"{prefix}_Country": country_name(address.get("country")),
     }
     return {k: v for k, v in values.items() if v}
+
+
+def payment_terms_text(terms):
+    """Superbud payment-terms snapshot -> one readable line for Zoho's Terms and Conditions."""
+    if not terms:
+        return None
+    parts = []
+    if terms.get("paymentTerm"):
+        parts.append(f"Payment term: {str(terms['paymentTerm']).replace('_', ' ').title()}")
+    if terms.get("billOn"):
+        parts.append(f"Bill on: {str(terms['billOn']).replace('_', ' ').title()}")
+    if terms.get("delinquentAfterDays") is not None:
+        parts.append(f"Delinquent after {terms['delinquentAfterDays']} days")
+    if terms.get("preferredPaymentMethod"):
+        parts.append(f"Preferred method: {str(terms['preferredPaymentMethod']).replace('_', ' ').title()}")
+    return " | ".join(parts) or None
 
 
 # ---------------------------------------------------------- dispensaries -----

@@ -28,14 +28,15 @@ PRODUCT_FIELDS = """
   brand { name }
   collections(pagination: {first: 5}) { edges { node { id name } } }
   options {
-    id name sku basePriceDollars displayQuantityAvailable packSize packType
+    id name sku basePriceDollars msrpDollars displayQuantityAvailable displayQuantityReserved packSize packType
   }
 """
 
 PERSON = "id firstName lastName email phoneNumber"
 
 ORDER_FIELDS = f"""
-  id orderNumber status approvalState version createdAt approvedAt dueDate
+  id orderNumber status approvalState version createdAt approvedAt dueDate source
+  paymentTerms {{ billOn delinquentAfterDays paymentTerm preferredPaymentMethod }}
   submittedAt shippedAt deliveredAt cancelledAt fullyPaidAt
   balanceDueDollars isUnpaid isPastDue daysPastDue
   subtotal total shippingFee localTax stateTax credits manualAdjustments

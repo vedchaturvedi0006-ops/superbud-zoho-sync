@@ -90,11 +90,13 @@ class Sync:
             "id, Account_Name, License_number, Superbud_Customer_ID, Superbud_Customer_Location_ID, "
             "Superbud_Location_Name, Superbud_Sync_Status, Billing_Street, Billing_City, Billing_State, "
             "Billing_Code, Billing_Country, Shipping_Street, Shipping_City, Shipping_State, Shipping_Code, "
-            "Shipping_Country, Website, Owner", "Accounts")
-        self.contacts = z.coql_all("id, First_Name, Last_Name, Email, Phone, Superbud_Buyer_User_ID, Account_Name",
+            "Shipping_Country, Website, Owner, Billing_Flat_House_No_Building_Apartment_Name, "
+            "Shipping_Flat_House_No_Building_Apartment_Name", "Accounts")
+        self.contacts = z.coql_all("id, First_Name, Last_Name, Email, Phone, Superbud_Buyer_User_ID, Account_Name, "
+                                   "Mailing_Street",
                                    "Contacts")
         self.products = z.coql_all("id, Product_Name, Product_Code, Product_Category, Sub_Category, Flavour, "
-                                   "Unit_Price, Qty_in_Stock, Brand, Product_Active, Superbud_Product_ID, "
+                                   "Unit_Price, Qty_in_Stock, Qty_in_Demand, Description, Brand, Product_Active, Superbud_Product_ID, "
                                    "Superbud_Product_Option_ID", "Products")
         self.deals = z.coql_all("id, Deal_Name, Stage, Amount, Closing_Date, Account_Name, Contact_Name, "
                                 "Superbud_Order_ID, Superbud_Order_Number, Superbud_Order_Status, Sync_Source, "
@@ -134,6 +136,7 @@ class Sync:
     # =========================================================== locations ==
     def sync_locations(self):
         locations = self.sb.customer_locations()
+        self.loc_by_id = {l["id"]: l for l in locations}
         self.internal_ids |= {(l.get("assignedSalesRep") or {}).get("id") for l in locations} - {None}
         per_customer = Counter((l.get("customer") or {}).get("id") for l in locations)
         sb_ids = {l["id"] for l in locations}
@@ -300,6 +303,7 @@ class Sync:
                     "Superbud_Product_ID": prod["id"],
                     "Unit_Price": mapping.unit_price(opt, mode),
                     "Qty_in_Stock": opt.get("displayQuantityAvailable"),
+                    "Qty_in_Demand": opt.get("displayQuantityReserved"),
                     "Product_Active": True,
                 }
                 if opt.get("sku"):
@@ -340,6 +344,10 @@ class Sync:
                         record["Description"] = desc[:2000]
                     creates.append((opt, record))
                     continue
+                if not zp.get("Description"):
+                    desc = " | ".join(x for x in (opt.get("name"), prod.get("description")) if x)
+                    if desc:
+                        wanted["Description"] = desc[:2000]
                 diff = _changed(zp, wanted)
                 if diff:
                     updates.append((zp, opt, dict(diff, id=zp["id"])))
@@ -420,6 +428,8 @@ class Sync:
                 contact_id = self.ensure_contact(order.get("buyerRep"), account, order)
                 placed = order.get("placedByUser") or {}
                 placed_id = None
+                if order.get("source") == "INTERNAL_REP" and placed.get("id"):
+                    self.internal_ids.add(placed["id"])  # a distributor employee placed it
                 if placed.get("id") and placed["id"] != (order.get("buyerRep") or {}).get("id"):
                     placed_id = self.ensure_contact(placed, account, order)
                 deal_id = self.upsert_deal(order, account, contact_id or placed_id)
@@ -448,6 +458,10 @@ class Sync:
             if value and (contact is None or linked is not None or not contact.get(key)):
                 wanted[key] = value
         name = f"{buyer.get('firstName') or ''} {buyer.get('lastName') or ''}".strip() or email
+        store = self.loc_by_id.get((order.get("customerLocation") or {}).get("id")) or {}
+        if contact is None or not contact.get("Mailing_Street"):
+            wanted.update(mapping.zoho_address(store.get("address") or store.get("businessAddress"),
+                                               "Mailing", zip_field="Zip"))
         if contact is None:
             record = dict(wanted, Account_Name={"id": account["id"]})
             record.setdefault("Last_Name", buyer.get("lastName") or buyer.get("firstName") or email or "Unknown")
@@ -516,6 +530,9 @@ class Sync:
         deal = self.deal_by_order.get(order["id"])
         label = f"Order #{order.get('orderNumber')}"
         if deal is None:
+            earlier = any((d.get("Account_Name") or {}).get("id") == account["id"]
+                          for d in self.deal_by_order.values())
+            wanted["Type"] = "Existing Business" if earlier else "New Business"
             record = dict(wanted, Deal_Products=self._deal_products(order))
             new_id = first_id(self.z.create("Deals", [record]))
             if not new_id:
@@ -609,7 +626,9 @@ class Sync:
                 "List_Price": line.get("basePriceDollars") if line.get("basePriceDollars") is not None
                 else line.get("priceDollars"),
                 "Discount": round(line.get("discountDollars") or 0, 2),
+                "Description": (line.get("option") or {}).get("name"),
             }
+            item = {k: v for k, v in item.items() if v is not None}
             if by_product.get(zp["id"]):
                 item["id"] = by_product[zp["id"]].pop(0)["id"]
             items.append(item)
@@ -632,14 +651,16 @@ class Sync:
             self.report.add("Sales Order", "needs review",
                             f"{label}: products not linked in Zoho yet: {', '.join(map(str, missing))}")
             return
-        adjustment = (order.get("shippingFee") or 0) - (order.get("credits") or 0) + (order.get("manualAdjustments") or 0)
+        adjustment = (order.get("shippingFee") or 0) + (order.get("manualAdjustments") or 0)
         record = {
             "Subject": mapping.deal_name(order),
             "Status": mapping.sales_order_status(order.get("status")),
             "Account_Name": {"id": account["id"]},
             "Ordered_Items": items,
             "Tax": round((order.get("stateTax") or 0) + (order.get("localTax") or 0), 2),
+            "Discount": round(order.get("credits") or 0, 2),
             "Adjustment": round(adjustment, 2),
+            "Purchase_Order": f"SB-{order.get('orderNumber')}",
             "Superbud_Order_ID": order["id"],
             "Superbud_Order_Number": str(order.get("orderNumber")),
             "Superbud_Order_Version": order.get("version"),
@@ -652,7 +673,23 @@ class Sync:
             record["Contact_Name"] = {"id": contact_id}
         if order.get("dueDate"):
             record["Due_Date"] = order["dueDate"][:10]
-        record.update(mapping.zoho_address(order.get("shippingAddress"), "Shipping"))
+        store = self.loc_by_id.get((order.get("customerLocation") or {}).get("id")) or {}
+        record.update(mapping.zoho_address(store.get("businessAddress") or store.get("address"), "Billing"))
+        record.update(mapping.zoho_address(order.get("shippingAddress") or store.get("address"), "Shipping"))
+        if account.get("License_number"):
+            record["Customer_No"] = account["License_number"]
+        terms = mapping.payment_terms_text(order.get("paymentTerms"))
+        if terms:
+            record["Terms_and_Conditions"] = terms
+        source = {"BUYER_GENERATED": "Placed by the store in Superbud",
+                  "INTERNAL_REP": "Placed by a sales rep in Superbud",
+                  "PLATFORM": "Placed in Superbud"}.get(order.get("source"), "Superbud order")
+        balance = order.get("balanceDueDollars")
+        record["Description"] = f"{source}. Superbud status: {order.get('status')}" + (
+            f". Balance due: ${balance:,.2f}" if balance is not None else "")
+        owner = self.owner(order.get("salesRep"))
+        if owner:
+            record["Owner"] = owner
         if so is None:
             new_id = first_id(self.z.create("Sales_Orders", [record]))
             if new_id:
@@ -673,6 +710,7 @@ class Sync:
         self.load_zoho()
         self.orders, self.active_locations, self.skipped_dead = {}, set(), []
         self.internal_ids = set()
+        self.loc_by_id = {}
         for step in (self.fetch_orders, self.sync_locations, self.sync_products, self.sync_orders):
             try:
                 step()
