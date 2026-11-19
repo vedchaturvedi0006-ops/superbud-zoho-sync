@@ -77,7 +77,8 @@ class FakeZoho:
 
 def location(lid, name, cust_id, cust_name):
     return {"id": lid, "name": name, "customer": {"id": cust_id, "name": cust_name},
-            "address": {"line1": "1 Main St", "city": "Main Street", "state": "MI", "zip": "49417"},
+            "address": {"line1": "1 Main St", "line2": "Suite 2", "city": "Main Street", "state": "MI",
+                        "zip": "49417", "country": "US"},
             "businessAddress": None, "assignedSalesRep": {"id": "r1", "email": "rep@example.com"}}
 
 
@@ -301,6 +302,43 @@ class SyncTests(unittest.TestCase):
         run(z, sb)
         names = [p["Product_Name"] for p in z.db["Products"].values()]
         self.assertEqual(len(names), len(set(n.lower() for n in names)), names)
+
+    def test_common_fields_filled_everywhere(self):
+        z, sb = setup()
+        o = sb.orders[0]
+        o.update(status="CONFIRMED", approvalState="APPROVED", credits=10.0, shippingFee=5.0, manualAdjustments=0,
+                 source="INTERNAL_REP", balanceDueDollars=145.0,
+                 paymentTerms={"paymentTerm": "NET_30", "billOn": "DELIVERY", "delinquentAfterDays": 45,
+                               "preferredPaymentMethod": "ACH"},
+                 placedByUser={"id": "staff1", "firstName": "Office", "lastName": "Staff", "email": "ops@example.com"})
+        sb.products_list[0]["options"][0]["displayQuantityReserved"] = 3
+        run(z, sb)
+        acc = next(a for a in z.db["Accounts"].values() if a.get("Superbud_Customer_Location_ID") == "L1")
+        self.assertEqual((acc["Shipping_State"], acc["Shipping_Country"]), ("Michigan", "United States"))
+        self.assertEqual(acc["Shipping_Flat_House_No_Building_Apartment_Name"], "Suite 2")
+        self.assertEqual(acc["Shipping_Street"], "1 Main St")
+        deal = next(iter(z.db["Deals"].values()))
+        self.assertEqual(deal["Type"], "New Business")
+        so = next(iter(z.db["Sales_Orders"].values()))
+        self.assertEqual(so["Purchase_Order"], "SB-7")
+        self.assertEqual(so["Customer_No"], "AU-R-000001")
+        self.assertEqual(so["Discount"], 10.0)
+        self.assertEqual(so["Adjustment"], 5.0)
+        self.assertEqual(so["Billing_State"], "Michigan")
+        self.assertIn("Net 30", so["Terms_and_Conditions"])
+        self.assertIn("sales rep", so["Description"])
+        self.assertEqual(so["Owner"], {"id": "u1"})
+        self.assertEqual(so["Ordered_Items"][0]["Description"], "1g")
+        # rep-placed order: the submitting staff member is not a customer contact
+        self.assertFalse(any(c.get("Email") == "ops@example.com" for c in z.db["Contacts"].values()))
+        buyer = next(c for c in z.db["Contacts"].values() if c.get("Superbud_Buyer_User_ID") == "B1")
+        self.assertEqual(buyer["Mailing_State"], "Michigan")
+        mojito = next(p for p in z.db["Products"].values() if p.get("Superbud_Product_Option_ID") == "O1")
+        self.assertEqual(mojito["Qty_in_Demand"], 3)
+        # nothing changes on a second run
+        z.writes.clear()
+        run(z, sb)
+        self.assertEqual([w for w in z.writes if w[1] != "Notes"], [], z.writes)
 
     def test_draft_order_becomes_open_deal_without_sales_order(self):
         z, sb = setup()
