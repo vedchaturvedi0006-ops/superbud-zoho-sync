@@ -1,0 +1,37 @@
+[
+  {
+    "collection": "Rusty Nail Infused Pre-Rolls",
+    "strip": ["Rusty Nail Infused Pre-Rolls"],
+    "category": "Pre Rolls",
+    "sub_category": "Infused Rusty Nail",
+    "name_prefix": "Rusty Nail"
+  },
+  {
+    "collection": "Flavor Bombs Infused Pre-Rolls",
+    "strip": ["Flavor Bombs Infused Pre-Rolls"],
+    "category": "Pre Rolls",
+    "sub_category": "Flavor Bombs",
+    "name_prefix": "Flavor Bombs"
+  },
+  {
+    "collection": "Bulk Flower",
+    "strip": ["Bulk Flower"],
+    "category": "Flowers",
+    "sub_category": "Bulk Flower",
+    "name_prefix": "Bulk Flower"
+  },
+  {
+    "collection": "Reefer Gladness 50mg 4-Packs",
+    "strip": ["Reefer Gladness", "4-Pack"],
+    "category": "Kitchen",
+    "sub_category": "50mg gummies",
+    "name_prefix": "50mg Gummies"
+  },
+  {
+    "collection": "Reefer Gladness 200mg Singles",
+    "strip": ["Reefer Gladness", "Single"],
+    "category": "Kitchen",
+    "sub_category": "200mg gummies",
+    "name_prefix": "200mg Gummies"
+  }
+]
