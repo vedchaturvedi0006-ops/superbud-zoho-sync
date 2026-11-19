@@ -25,7 +25,12 @@ _load_env()
 
 
 def get(name, default=None):
-    return os.environ.get(name, default)
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    # Secrets pasted into GitHub often carry a trailing newline or spaces
+    value = value.strip()
+    return value if value else default
 
 
 def flag(name, default=False):

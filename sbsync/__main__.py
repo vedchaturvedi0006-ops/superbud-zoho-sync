@@ -37,8 +37,28 @@ def cmd_auth(code):
     print("Zoho refresh token saved to .env. Next: python -m sbsync check")
 
 
+def _safe_code(exc):
+    """Error type + HTTP status + API error code only - no record data (logs are public)."""
+    parts = [type(exc).__name__]
+    status = getattr(exc, "status", None)
+    if status:
+        parts.append(f"HTTP {status}")
+    body = getattr(exc, "body", None)
+    code = None
+    if isinstance(body, dict):
+        code = body.get("error") or body.get("code")
+        errs = body.get("errors")
+        if not code and isinstance(errs, list) and errs and isinstance(errs[0], dict):
+            code = (errs[0].get("extensions") or {}).get("code")
+    elif str(exc).startswith("SUPERBUD_API_KEY is missing"):
+        code = "SUPERBUD_API_KEY missing"
+    if code:
+        parts.append(str(code)[:60])
+    return ", ".join(parts)
+
+
 def _err(exc):
-    return type(exc).__name__ + " (details hidden in public logs)" if config.QUIET_OUTPUT() else str(exc)
+    return _safe_code(exc) + " (details hidden in public logs)" if config.QUIET_OUTPUT() else str(exc)
 
 
 def cmd_check():
@@ -106,7 +126,7 @@ def cmd_run(live_flag):
         path = _log(traceback.format_exc(), "crash")
         if config.QUIET_OUTPUT():
             # error text can contain record data, so only the error type goes to public logs
-            print(f"Sync crashed ({type(exc).__name__}). Run it on your PC to see the details.")
+            print(f"Sync crashed ({_safe_code(exc)}). Run it on your PC to see the details.")
             return 1
         print(f"Sync crashed - details in {path}")
         raise
