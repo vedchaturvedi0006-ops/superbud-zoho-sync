@@ -597,18 +597,18 @@ class Sync:
     # -- activity history + payments as Notes on the Deal --
     @staticmethod
     def _describe_event(entry):
+        """Superbud history entry -> readable (title, body) for a Zoho Note."""
         raw = entry.get("eventJson") or ""
         try:
-            event = json.loads(raw)
+            event = json.loads(raw) if isinstance(raw, str) else raw
         except (TypeError, ValueError):
             event = None
-        if isinstance(event, dict):
-            kind = event.get("type") or event.get("__typename") or event.get("kind") or event.get("event") or "Activity"
-            detail = {k: v for k, v in event.items() if k not in ("type", "__typename", "kind", "event")}
-            body = json.dumps(detail, indent=1, default=str) if detail else ""
-        else:
-            kind, body = "Activity", raw
-        return str(kind).replace("_", " ").title(), body[:3000]
+        when = entry.get("occurredAt") or entry.get("createdAt")
+        if not isinstance(event, dict):
+            return "Order activity", (str(raw) or "Order activity")[:3000]
+        kind = event.get("type") or event.get("__typename") or event.get("kind") or event.get("event")
+        title, body = mapping.describe_activity(kind, event, when)
+        return title, body[:3000]
 
     def sync_activity(self, order, deal_id):
         deal = self.deal_by_order.get(order["id"]) or {}
@@ -617,16 +617,15 @@ class Sync:
         history = sorted(order.get("history") or [], key=lambda e: e.get("occurredAt") or e.get("createdAt") or "")
         done_h = int(deal.get("Superbud_History_Count") or 0)
         for entry in history[done_h:]:
-            kind, body = self._describe_event(entry)
-            when = (entry.get("occurredAt") or entry.get("createdAt") or "")[:16].replace("T", " ")
-            notes.append({"Note_Title": f"Superbud: {kind} ({when} UTC)", "Note_Content": body or kind,
+            title, body = self._describe_event(entry)
+            notes.append({"Note_Title": f"Superbud: {title}", "Note_Content": body or title,
                           "Parent_Id": {"module": {"api_name": "Deals"}, "id": deal_id}})
         payments = sorted(order.get("payments") or [], key=lambda p: p.get("paymentDate") or "")
         done_p = int(deal.get("Superbud_Payment_Count") or 0)
         for pay in payments[done_p:]:
             amount = pay.get("amountDollars") or 0
             kind = "Refund" if amount < 0 else "Payment"
-            parts = [f"Amount: ${abs(amount):,.2f}", f"Method: {pay.get('method') or '-'}",
+            parts = [f"Amount: ${abs(amount):,.2f}", f"Method: {str(pay.get('method') or '-').replace('_', ' ').title()}",
                      f"Date: {(pay.get('paymentDate') or '')[:10]}"]
             if pay.get("referenceNumber"):
                 parts.append(f"Reference: {pay['referenceNumber']}")

@@ -1,4 +1,5 @@
 """Business rules: how Superbud values turn into Zoho values."""
+import datetime as dt
 import json
 import re
 
@@ -156,3 +157,85 @@ def unit_price(option, mode):
     if mode == "unit" and pack:
         return round(price / pack, 4)
     return price
+
+
+# ---------------------------------------------------------------- activity notes --
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30), "IST")
+
+_NOISE_KEYS = {"id", "metadata", "__typename", "context", "userType", "source"}
+
+
+def _label(value):
+    if isinstance(value, dict):
+        return value.get("name") or value.get("id") or ""
+    return "" if value is None else str(value)
+
+
+def _when(iso):
+    try:
+        t = dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso or "")
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=dt.timezone.utc)
+    t = t.astimezone(IST)
+    return t.strftime("%d %b %Y, %I:%M %p IST").replace(" 0", " ").replace("AM", "am").replace("PM", "pm")
+
+
+def _line_text(line):
+    """One product line of a 'lines changed' event."""
+    to, frm = line.get("to") or {}, line.get("from") or {}
+    cur = to or frm
+    meta = cur.get("metadata") or {}
+    name = cur.get("name") or "Product"
+    option = _label(meta.get("option"))
+    qty = meta.get("quantity")
+    old_qty = (frm.get("metadata") or {}).get("quantity")
+    what = f"{name}" + (f" ({option})" if option else "")
+    if to and not frm:
+        return f"Added: {what}" + (f", qty {qty}" if qty is not None else "")
+    if frm and not to:
+        return f"Removed: {what}"
+    if qty is not None and old_qty is not None and qty != old_qty:
+        return f"Changed: {what}, qty {old_qty} → {qty}"
+    return f"Changed: {what}" + (f", qty {qty}" if qty is not None else "")
+
+
+def _plain(payload, depth=0):
+    """Fallback: readable 'Key: value' lines for event types we don't format specially."""
+    out = []
+    for key, value in (payload or {}).items():
+        if key in _NOISE_KEYS or value in (None, "", [], {}):
+            continue
+        nice = key[0].upper() + "".join(f" {c.lower()}" if c.isupper() else c for c in key[1:])
+        if isinstance(value, dict) and ("name" in value or "id" in value):
+            out.append(f"{nice}: {_label(value)}")
+        elif isinstance(value, dict) and depth < 2:
+            out.extend(_plain(value, depth + 1))
+        elif isinstance(value, list):
+            out.append(f"{nice}: " + ", ".join(_label(v) if isinstance(v, dict) else str(v) for v in value))
+        else:
+            out.append(f"{nice}: {value}")
+    return out
+
+
+def describe_activity(kind, event, occurred_at):
+    """Superbud order history event -> (Zoho note title, plain-text body)."""
+    event = event if isinstance(event, dict) else {}
+    kind_text = str(kind or event.get("type") or "Activity").replace("_", " ").strip().title()
+    actor = _label(event.get("actor")) or "Superbud"
+    payload = event.get("payload") or {}
+    when = _when(occurred_at) if occurred_at else ""
+    by = f"By {actor}" + (f" on {when}" if when else "")
+    key = kind_text.lower()
+    if "status" in key and ("to" in payload or "from" in payload):
+        frm, to = _label(payload.get("from")), _label(payload.get("to"))
+        title = f"Status changed: {frm} → {to}" if frm else f"Status changed to {to}"
+        return title, by
+    if key in ("created", "order created"):
+        return "Order created", by
+    if "line" in key and isinstance(payload.get("lines"), list):
+        lines = [_line_text(l) for l in payload["lines"] if isinstance(l, dict)]
+        return "Products changed", "\n".join([by] + lines)
+    detail = _plain(payload)
+    return kind_text, "\n".join([by] + detail)
