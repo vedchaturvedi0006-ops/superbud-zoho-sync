@@ -379,6 +379,19 @@ class SyncTests(unittest.TestCase):
         self.assertEqual((acc["Billing_Street"], acc["Billing_State"], acc["Billing_Country"]),
                          ("1 Main St", "Michigan", "United States"))
 
+    def test_activity_notes_are_readable(self):
+        ev = {"type": "STATUS_CHANGED", "actor": {"id": "x", "name": "Rep One", "metadata": {"type": "USER"}},
+              "payload": {"to": {"id": "PACKED", "name": "Packed"}, "from": {"id": "CONFIRMED", "name": "Confirmed"}}}
+        title, body = mapping.describe_activity(ev["type"], ev, "2026-11-19T14:14:00Z")
+        self.assertEqual(title, "Status changed: Confirmed → Packed")
+        self.assertEqual(body, "By Rep One on 19 Nov 2026, 7:44 pm IST")
+        lines = {"actor": {"name": "Rep One"}, "payload": {"lines": [
+            {"to": {"name": "Gummies", "metadata": {"quantity": 2, "option": {"name": "Case of 50"}}}, "from": None}]}}
+        title, body = mapping.describe_activity("LINES_CHANGED", lines, "2026-11-19T14:12:00Z")
+        self.assertEqual(title, "Products changed")
+        self.assertIn("Added: Gummies (Case of 50), qty 2", body)
+        self.assertNotIn("{", body)
+
     def test_zoho_state_labels(self):
         self.assertEqual(mapping.state_name("FL"), "Florida (United States)")
         self.assertEqual(mapping.state_name("MI"), "Michigan")
