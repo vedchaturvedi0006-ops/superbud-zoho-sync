@@ -340,6 +340,50 @@ class SyncTests(unittest.TestCase):
         run(z, sb)
         self.assertEqual([w for w in z.writes if w[1] != "Notes"], [], z.writes)
 
+    def test_old_records_get_backfilled(self):
+        """Records made before a field was mapped are filled in without a new Superbud change."""
+        z, sb = setup()
+        o = sb.orders[0]
+        o.update(status="CONFIRMED", approvalState="APPROVED",
+                 paymentTerms={"paymentTerm": "NET_30", "billOn": "DELIVERY", "delinquentAfterDays": 45})
+        run(z, sb)
+        acc = next(a for a in z.db["Accounts"].values() if a.get("Superbud_Customer_Location_ID") == "L1")
+        deal = next(iter(z.db["Deals"].values()))
+        so = next(iter(z.db["Sales_Orders"].values()))
+        # simulate what the older sync version left behind
+        acc.update(Billing_Street="9 Old Rd", Billing_City="Oldtown", Billing_State="MI", Billing_Country=None)
+        deal["Type"] = None
+        for k in ("Purchase_Order", "Customer_No", "Terms_and_Conditions", "Billing_State", "Billing_Street"):
+            so[k] = None
+        so["Shipping_State"], so["Shipping_Country"] = "MI", "US"
+        z.writes.clear()
+        run(z, sb)
+        self.assertEqual((acc["Billing_Street"], acc["Billing_State"], acc["Billing_Country"]),
+                         ("9 Old Rd", "Michigan", "United States"))  # Zoho's street kept, codes fixed
+        self.assertEqual(deal["Type"], "New Business")
+        self.assertEqual(so["Purchase_Order"], "SB-7")
+        self.assertEqual(so["Customer_No"], "AU-R-000001")
+        self.assertIn("Net 30", so["Terms_and_Conditions"])
+        self.assertEqual((so["Shipping_State"], so["Shipping_Country"]), ("Michigan", "United States"))
+        self.assertEqual(so["Billing_State"], "Michigan")
+        so_writes = [w for w in z.writes if w[1] == "Sales_Orders"]
+        self.assertTrue(so_writes and all("Ordered_Items" not in w[2] for w in so_writes), so_writes)
+        z.writes.clear()
+        run(z, sb)
+        self.assertEqual([w for w in z.writes if w[1] != "Notes"], [], z.writes)
+
+    def test_empty_billing_filled_from_store_address(self):
+        z, sb = setup()
+        run(z, sb)
+        acc = next(a for a in z.db["Accounts"].values() if a.get("Superbud_Customer_Location_ID") == "L1")
+        self.assertEqual((acc["Billing_Street"], acc["Billing_State"], acc["Billing_Country"]),
+                         ("1 Main St", "Michigan", "United States"))
+
+    def test_zoho_state_labels(self):
+        self.assertEqual(mapping.state_name("FL"), "Florida (United States)")
+        self.assertEqual(mapping.state_name("MI"), "Michigan")
+        self.assertEqual(mapping.state_name("Michigan"), "Michigan")
+
     def test_draft_order_becomes_open_deal_without_sales_order(self):
         z, sb = setup()
         sb.orders[0]["status"] = "DRAFT"
