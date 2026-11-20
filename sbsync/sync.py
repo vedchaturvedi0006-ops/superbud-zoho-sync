@@ -74,6 +74,16 @@ def _changed(current, wanted):
     return out
 
 
+SO_ADDRESS_FIELDS = ", ".join(f"{p}_{f}" for p in ("Billing", "Shipping") for f in (
+    "Street", "Flat_House_No_Building_Apartment_Name", "City", "State", "Code", "Country"))
+
+# Sales Order header fields that are refreshed even when Superbud's order version is unchanged
+# (so records made before a field was mapped get filled in). Totals and line items follow the version.
+SO_HEADER_FIELDS = {"Subject", "Status", "Account_Name", "Deal_Name", "Contact_Name", "Purchase_Order",
+                    "Superbud_Order_Number", "Due_Date", "Customer_No", "Terms_and_Conditions", "Description",
+                    "Sync_Source"} | set(SO_ADDRESS_FIELDS.split(", "))
+
+
 class Sync:
     def __init__(self, zoho, superbud, live=False):
         self.z = zoho
@@ -98,14 +108,16 @@ class Sync:
         self.products = z.coql_all("id, Product_Name, Product_Code, Product_Category, Sub_Category, Flavour, "
                                    "Unit_Price, Qty_in_Stock, Qty_in_Demand, Description, Brand, Product_Active, Superbud_Product_ID, "
                                    "Superbud_Product_Option_ID", "Products")
-        self.deals = z.coql_all("id, Deal_Name, Stage, Amount, Closing_Date, Account_Name, Contact_Name, "
+        self.deals = z.coql_all("id, Deal_Name, Stage, Amount, Closing_Date, Account_Name, Contact_Name, Type, "
                                 "Superbud_Order_ID, Superbud_Order_Number, Superbud_Order_Status, Sync_Source, "
                                 "Superbud_Submitted_At, Superbud_Approved_At, Superbud_Shipped_At, "
                                 "Superbud_Delivered_At, Superbud_Cancelled_At, Superbud_Fully_Paid_At, "
                                 "Superbud_Balance_Due, Superbud_Past_Due, Superbud_Days_Past_Due, "
                                 "Superbud_History_Count, Superbud_Payment_Count",
                                 "Deals", where="Superbud_Order_ID is not null")
-        self.sales_orders = z.coql_all("id, Subject, Status, Superbud_Order_ID, Superbud_Order_Version, Deal_Name",
+        self.sales_orders = z.coql_all("id, Subject, Status, Superbud_Order_ID, Superbud_Order_Version, Deal_Name, "
+                                       "Account_Name, Contact_Name, Purchase_Order, Superbud_Order_Number, Due_Date, "
+                                       "Customer_No, Terms_and_Conditions, Description, Sync_Source, " + SO_ADDRESS_FIELDS,
                                        "Sales_Orders", where="Superbud_Order_ID is not null")
         try:
             self.users_by_email = {u["email"].lower(): u["id"] for u in z.users() if u.get("email")}
@@ -132,6 +144,25 @@ class Sync:
         email = ((user or {}).get("email") or "").lower()
         uid = self.users_by_email.get(email)
         return {"id": uid} if uid else None
+
+    @staticmethod
+    def _billing_backfill(acc, store_address):
+        """Superbud has no separate billing address for this store. Keep what Zoho has,
+        fix "MI"/"US" codes the State/Country dropdowns don't accept, and fill only empty
+        billing fields from the store address."""
+        out = {}
+        for field, fix in (("Billing_State", mapping.state_name), ("Billing_Country", mapping.country_name)):
+            have = acc.get(field)
+            if have and fix(have) != have:
+                out[field] = fix(have)
+        if store_address and not acc.get("Billing_Street"):
+            for key, value in mapping.zoho_address(store_address, "Billing").items():
+                if not acc.get(key):
+                    out[key] = value
+        elif not acc.get("Billing_Country") and (acc.get("Billing_State") or out.get("Billing_State")):
+            country = mapping.country_name((store_address or {}).get("country") or "US")
+            out["Billing_Country"] = country
+        return out
 
     # =========================================================== locations ==
     def sync_locations(self):
@@ -219,8 +250,11 @@ class Sync:
 
             # Existing Dispensary: Zoho name and license stay as they are. Superbud is the
             # source for addresses, the assigned sales rep and the website.
-            for prefix, addr in (("Billing", loc.get("businessAddress")), ("Shipping", loc.get("address"))):
-                wanted.update(mapping.zoho_address(addr, prefix))
+            wanted.update(mapping.zoho_address(loc.get("address"), "Shipping"))
+            if loc.get("businessAddress"):
+                wanted.update(mapping.zoho_address(loc["businessAddress"], "Billing"))
+            else:
+                wanted.update(self._billing_backfill(acc, loc.get("address")))
             if customer.get("website") and not acc.get("Website"):
                 wanted["Website"] = customer["website"]
             owner = self.owner(loc.get("assignedSalesRep"))
@@ -542,6 +576,12 @@ class Sync:
             self.deal_by_order[order["id"]] = record
             self.report.add("Deal", "created", f"{wanted['Deal_Name']} - {stage} - ${order.get('total')}")
             return new_id
+        if not deal.get("Type"):
+            this_no = int(order.get("orderNumber") or 0)
+            earlier = any((d.get("Account_Name") or {}).get("id") == account["id"]
+                          and int(d.get("Superbud_Order_Number") or 0) < this_no
+                          for d in self.deal_by_order.values() if d is not deal)
+            wanted["Type"] = "Existing Business" if earlier else "New Business"
         diff = _changed(deal, {k: v for k, v in wanted.items() if k != "Owner"})
         if diff:
             if "Amount" in diff or "Superbud_Order_Status" in diff:
@@ -640,23 +680,12 @@ class Sync:
     def upsert_sales_order(self, order, account, contact_id, deal_id):
         label = f"Order #{order.get('orderNumber')}"
         so = self.so_by_order.get(order["id"])
-        if so and str(so.get("Superbud_Order_Version")) == str(order.get("version")):
-            self.report.add("Sales Order", "unchanged", f"{label} (version {order.get('version')})")
-            return
-        existing_rows = []
-        if so and so.get("id") and not str(so["id"]).startswith("DRY"):
-            existing_rows = self.z.get_record("Sales_Orders", so["id"]).get("Ordered_Items") or []
-        items, missing = self._ordered_items(order, existing_rows)
-        if missing:
-            self.report.add("Sales Order", "needs review",
-                            f"{label}: products not linked in Zoho yet: {', '.join(map(str, missing))}")
-            return
+        same_version = bool(so) and str(so.get("Superbud_Order_Version")) == str(order.get("version"))
         adjustment = (order.get("shippingFee") or 0) + (order.get("manualAdjustments") or 0)
         record = {
             "Subject": mapping.deal_name(order),
             "Status": mapping.sales_order_status(order.get("status")),
             "Account_Name": {"id": account["id"]},
-            "Ordered_Items": items,
             "Tax": round((order.get("stateTax") or 0) + (order.get("localTax") or 0), 2),
             "Discount": round(order.get("credits") or 0, 2),
             "Adjustment": round(adjustment, 2),
@@ -690,6 +719,26 @@ class Sync:
         owner = self.owner(order.get("salesRep"))
         if owner:
             record["Owner"] = owner
+
+        if same_version:
+            header = _changed(so, {k: v for k, v in record.items() if k in SO_HEADER_FIELDS})
+            if not header:
+                self.report.add("Sales Order", "unchanged", f"{label} (version {order.get('version')})")
+                return
+            self.z.update("Sales_Orders", [dict(header, id=so["id"])])
+            so.update(header)
+            self.report.add("Sales Order", "updated", f"{label} ({', '.join(header)})")
+            return
+
+        existing_rows = []
+        if so and so.get("id") and not str(so["id"]).startswith("DRY"):
+            existing_rows = self.z.get_record("Sales_Orders", so["id"]).get("Ordered_Items") or []
+        items, missing = self._ordered_items(order, existing_rows)
+        if missing:
+            self.report.add("Sales Order", "needs review",
+                            f"{label}: products not linked in Zoho yet: {', '.join(map(str, missing))}")
+            return
+        record["Ordered_Items"] = items
         if so is None:
             new_id = first_id(self.z.create("Sales_Orders", [record]))
             if new_id:
@@ -702,6 +751,7 @@ class Sync:
             record["id"] = so["id"]
             old_version = so.get("Superbud_Order_Version")
             self.z.update("Sales_Orders", [record])
+            so.update({k: v for k, v in record.items() if k in SO_HEADER_FIELDS})
             so["Superbud_Order_Version"] = order.get("version")
             self.report.add("Sales Order", "updated", f"{label}: version {old_version} -> {order.get('version')}")
 

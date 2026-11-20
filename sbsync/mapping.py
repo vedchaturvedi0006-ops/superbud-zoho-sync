@@ -53,7 +53,13 @@ def state_name(value):
     """Zoho's State dropdown uses full names ("Michigan"), Superbud sends codes ("MI")."""
     if not value:
         return value
-    return US_STATES.get(value.strip().upper(), value.strip())
+    name = US_STATES.get(value.strip().upper(), value.strip())
+    # Zoho's list has two places with these names, so the US ones carry a suffix
+    return ZOHO_STATE_LABELS.get(name, name)
+
+
+# State names that Zoho's picklist spells differently (checked against the live field list)
+ZOHO_STATE_LABELS = {"Florida": "Florida (United States)", "Montana": "Montana (United States)"}
 
 
 def country_name(value):
