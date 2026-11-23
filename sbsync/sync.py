@@ -12,21 +12,44 @@ from .http import ApiError
 from .zoho import first_id
 
 
+def safe_code(obj):
+    """Error code + field name only (no record data), for the public GitHub logs."""
+    body = getattr(obj, "body", obj)
+    parts = []
+    if getattr(obj, "status", None):
+        parts.append(f"HTTP {obj.status}")
+    if isinstance(body, dict):
+        items = body.get("data") if isinstance(body.get("data"), list) else [body]
+        for item in items[:3]:
+            if not isinstance(item, dict) or item.get("status") == "success":
+                continue
+            details = item.get("details") or {}
+            field = details.get("api_name") or (details.get("expected_data_type") and "type")
+            parts.append(" ".join(str(x) for x in (item.get("code"), field) if x))
+        if not items and body.get("code"):
+            parts.append(str(body["code"]))
+    return ", ".join(p for p in parts if p)[:200] or type(obj).__name__
+
+
 class Report:
     def __init__(self):
         self.counts = Counter()
         self.lines = []
+        self.codes = []
 
-    def add(self, kind, outcome, text):
+    def add(self, kind, outcome, text, code=None):
         self.counts[f"{kind}: {outcome}"] += 1
         self.lines.append(f"[{kind}] {outcome.upper():<13} {text}")
+        if code:
+            self.codes.append(f"{kind}: {code}")
 
     def render(self, live, details=True):
         head = ["=" * 78, f"SUPERBUD -> ZOHO SYNC  ({'LIVE' if live else 'DRY RUN - nothing was written'})",
                 f"Run at {dt.datetime.now():%Y-%m-%d %H:%M:%S}", "=" * 78]
         summary = [f"  {k:<40} {v}" for k, v in sorted(self.counts.items())]
         if not details:
-            return "\n".join(head + ["SUMMARY"] + summary +
+            codes = ["", "ERROR CODES (no record data)"] + [f"  {c}" for c in self.codes] if self.codes else []
+            return "\n".join(head + ["SUMMARY"] + summary + codes +
                              ["", "(Names and error details are hidden here because these logs are public. "
                                   "Run the sync on your PC to see them.)"])
         return "\n".join(head + ["SUMMARY"] + summary + ["", "DETAILS"] + self.lines)
@@ -282,7 +305,7 @@ class Sync:
                     self.acc_by_loc[loc["id"]] = rec
                     self.report.add("Dispensary", "created", rec["Account_Name"])
                 else:
-                    self.report.add("Dispensary", "error", f"{rec['Account_Name']}: {res}")
+                    self.report.add("Dispensary", "error", f"{rec['Account_Name']}: {res}", code=safe_code(res))
         if updates:
             results = self.z.update("Accounts", [r for _, _, r in updates])
             for (acc, loc, rec), res in zip(updates, results):
@@ -292,7 +315,7 @@ class Sync:
                     fields = ", ".join(k for k in rec if k != "id")
                     self.report.add("Dispensary", "updated", f"{acc['Account_Name']} ({fields})")
                 else:
-                    self.report.add("Dispensary", "error", f"{acc['Account_Name']}: {res}")
+                    self.report.add("Dispensary", "error", f"{acc['Account_Name']}: {res}", code=safe_code(res))
 
         if config.PUSH_LOCATIONS_TO_SUPERBUD():
             self.push_locations(locations)
@@ -414,7 +437,7 @@ class Sync:
                     fields = ", ".join(k for k in rec if k not in ("id",))
                     self.report.add("Product", label, f"{name} ({fields})" if label == "updated" else name)
                 else:
-                    self.report.add("Product", "error", f"{name}: {res}")
+                    self.report.add("Product", "error", f"{name}: {res}", code=safe_code(res))
 
     # ============================================================== orders ==
     def fetch_orders(self):
@@ -473,7 +496,7 @@ class Sync:
                 if (deal_id and won) or order["id"] in self.so_by_order:
                     self.upsert_sales_order(order, account, contact_id, deal_id)
             except ApiError as exc:
-                self.report.add("Order", "error", f"{label}: {exc}")
+                self.report.add("Order", "error", f"{label}: {exc}", code=safe_code(exc))
 
     # -- contacts --
     def ensure_contact(self, buyer, account, order):
@@ -764,5 +787,5 @@ class Sync:
             try:
                 step()
             except ApiError as exc:
-                self.report.add(step.__name__.replace("sync_", "").title(), "error", str(exc))
+                self.report.add(step.__name__.replace("sync_", "").title(), "error", str(exc), code=safe_code(exc))
         return self.report

@@ -94,7 +94,15 @@ class Zoho:
             return [{"status": "dry_run", "details": {"id": r.get("id", "DRY-RUN")}} for r in records]
         for i in range(0, len(records), 100):
             chunk = records[i:i + 100]
-            body = self._call(method, f"/{module}", json={"data": chunk, "trigger": []})
+            try:
+                body = self._call(method, f"/{module}", json={"data": chunk, "trigger": []})
+            except ApiError as exc:
+                # Zoho answers HTTP 400 when every record in the batch is rejected; the
+                # per-record reasons are still in the body, so report them record by record.
+                if isinstance(exc.body, dict) and isinstance(exc.body.get("data"), list):
+                    body = exc.body
+                else:
+                    raise
             results.extend(body.get("data", []))
         return results
 
