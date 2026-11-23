@@ -359,8 +359,8 @@ class Sync:
                     "Superbud_Product_Option_ID": opt["id"],
                     "Superbud_Product_ID": prod["id"],
                     "Unit_Price": mapping.unit_price(opt, mode),
-                    "Qty_in_Stock": opt.get("displayQuantityAvailable"),
-                    "Qty_in_Demand": opt.get("displayQuantityReserved"),
+                    "Qty_in_Stock": mapping.zoho_qty(opt.get("displayQuantityAvailable")),
+                    "Qty_in_Demand": mapping.zoho_qty(opt.get("displayQuantityReserved")),
                     "Product_Active": True,
                 }
                 if opt.get("sku"):

@@ -239,3 +239,16 @@ def describe_activity(kind, event, occurred_at):
         return "Products changed", "\n".join([by] + lines)
     detail = _plain(payload)
     return kind_text, "\n".join([by] + detail)
+
+
+def zoho_qty(value):
+    """Zoho's quantity fields reject negatives and long decimals. Superbud can show a
+    negative available quantity when an item is oversold; Zoho gets 0 then."""
+    if value is None:
+        return None
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        return None
+    qty = max(0.0, round(qty, 2))
+    return int(qty) if qty.is_integer() else qty
