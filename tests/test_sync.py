@@ -392,6 +392,14 @@ class SyncTests(unittest.TestCase):
         self.assertIn("Added: Gummies (Case of 50), qty 2", body)
         self.assertNotIn("{", body)
 
+    def test_negative_stock_is_written_as_zero(self):
+        z, sb = setup()
+        sb.products_list[1]["options"][0]["displayQuantityAvailable"] = -3
+        sb.products_list[1]["options"][0]["displayQuantityReserved"] = 2.333
+        run(z, sb)
+        p = next(p for p in z.db["Products"].values() if p.get("Superbud_Product_Option_ID") == "O2")
+        self.assertEqual((p["Qty_in_Stock"], p["Qty_in_Demand"]), (0, 2.33))
+
     def test_zoho_state_labels(self):
         self.assertEqual(mapping.state_name("FL"), "Florida (United States)")
         self.assertEqual(mapping.state_name("MI"), "Michigan")
