@@ -319,8 +319,11 @@ class RetailSync:
             rec.update({k: v for k, v in fields.items() if v is not None})
             old = have.pop(key, None)
             if old is not None:
-                if all(_same(old.get(k), v) for k, v in fields.items() if v is not None):
+                # a value that became blank (e.g. no comparison baseline any more) is cleared in Zoho
+                cleared = {k: None for k, v in fields.items() if v is None and old.get(k) not in (None, "")}
+                if not cleared and all(_same(old.get(k), v) for k, v in fields.items() if v is not None):
                     continue
+                rec.update(cleared)
                 rec["id"] = old["id"]
             out.append(rec)
         for key, old in have.items():
@@ -432,14 +435,24 @@ class RetailSync:
             rows = {}
             month = first_month
             while month <= today:
-                last_day = today.day if (month.year, month.month) == (today.year, today.month) else None
+                last_day = None
+                if (month.year, month.month) == (today.year, today.month):
+                    # month to date: up to the last day that has sales (today may have none yet)
+                    seen = [d.day for d in days if d.year == month.year and d.month == month.month]
+                    last_day = max(seen) if seen else today.day
                 cur = _month_sum(days, month, last_day)
                 if cur["_days"]:
+                    window = last_day or _days_in_month(month)
                     prev = [_month_sum(days, _add_months(month, -k), last_day) for k in (1, 2, 3)]
-                    prev = [p for p in prev if p["_days"]]
+                    # a month only counts if it has (nearly) all the days being compared,
+                    # e.g. the first partial month of history is left out
+                    prev = [p for p, k in zip(prev, (1, 2, 3))
+                            if p["_days"] >= 0.9 * min(window, _days_in_month(_add_months(month, -k)))]
                     f = {k: (int(round(cur[k])) if k in COUNT_FIELDS else round(cur[k], 2)) for k in SUMMABLE}
                     f["Avg_Basket"] = round(cur["Net_Sales"] / cur["Transactions"], 2) if cur["Transactions"] else 0
                     f["Days_In_Period"] = cur["_days"]
+                    f.update({k: None for k in ("Prev_3M_Net_Sales", "Prev_3M_Transactions", "Prev_3M_Avg_Basket",
+                                                "Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")})
                     if prev:
                         p_net = sum(p["Net_Sales"] for p in prev) / len(prev)
                         p_tx = sum(p["Transactions"] for p in prev) / len(prev)
@@ -479,6 +492,10 @@ class RetailSync:
 def _add_months(d, n):
     y, m = divmod(d.month - 1 + n, 12)
     return dt.date(d.year + y, m + 1, 1)
+
+
+def _days_in_month(month):
+    return (_add_months(month, 1) - dt.timedelta(days=1)).day
 
 
 def _month_sum(days, month, last_day=None):
