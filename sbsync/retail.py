@@ -437,7 +437,7 @@ class RetailSync:
                 if cur["_days"]:
                     prev = [_month_sum(days, _add_months(month, -k), last_day) for k in (1, 2, 3)]
                     prev = [p for p in prev if p["_days"]]
-                    f = {k: round(cur[k], 2) for k in SUMMABLE}
+                    f = {k: (int(round(cur[k])) if k in COUNT_FIELDS else round(cur[k], 2)) for k in SUMMABLE}
                     f["Avg_Basket"] = round(cur["Net_Sales"] / cur["Transactions"], 2) if cur["Transactions"] else 0
                     f["Days_In_Period"] = cur["_days"]
                     if prev:
