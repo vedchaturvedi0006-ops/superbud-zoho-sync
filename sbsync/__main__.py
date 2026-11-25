@@ -5,6 +5,7 @@
   python -m sbsync run                 run the sync (dry run unless LIVE=true in .env)
   python -m sbsync run --live          run and write to Zoho, this run only
   python -m sbsync schema Order        show the real fields of a Superbud type
+  python -m sbsync dutchie-check       test the Dutchie store keys (reads only)
 """
 import datetime as dt
 import json
@@ -134,6 +135,75 @@ def cmd_run(live_flag):
         LOCK.unlink(missing_ok=True)
 
 
+def _fields(rows):
+    keys = set()
+    for row in rows[:200]:
+        if isinstance(row, dict):
+            keys |= set(row)
+    return ", ".join(sorted(keys)) or "-"
+
+
+def _how_many(n):
+    """Exact counts on the PC; only a rough size in public GitHub logs."""
+    if not config.QUIET_OUTPUT():
+        return str(n)
+    return "none" if n == 0 else ("some (under 100)" if n < 100 else "100 or more")
+
+
+# Labels only (no names, emails or money) - safe to show in public logs
+_ENUM_FIELDS = ("orderType", "orderSource", "transactionType", "isReturn", "isVoid", "isMedical",
+                "customerTypeId", "category", "masterCategory", "productCategory", "unitWeightUnit")
+
+
+def _labels(rows, field):
+    vals = {str(r.get(field)) for r in rows if isinstance(r, dict) and r.get(field) not in (None, "")}
+    return ", ".join(sorted(vals)[:25])
+
+
+def cmd_dutchie_check():
+    from .dutchie import STORES, configured_stores, utc_days_ago
+    stores = configured_stores()
+    if not stores:
+        print("No Dutchie keys set. Add DUTCHIE_KEY_BENSON and DUTCHIE_KEY_RIVER as secrets.")
+        return 1
+    ok = True
+    for code, label, d in stores:
+        print(f"\n=== {label} ===")
+        try:
+            who = d.whoami() or {}
+            name = str(who.get("locationName") or who.get("name") or "")
+            expected = code in name.lower()
+            print(f"  key works      yes (location {'matches' if expected else 'does NOT match'} '{code}')")
+            print(f"  whoami fields  {_fields([who])}")
+        except ApiError as exc:
+            ok = False
+            print(f"  key works      NO - {_err(exc)}")
+            continue
+        start, end = utc_days_ago(7)
+        checks = (("transactions (7 days)", lambda: d.transactions(start, end)),
+                  ("products", d.products), ("inventory", d.inventory), ("employees", d.employees))
+        for name, fn in checks:
+            try:
+                rows = fn()
+                print(f"  {name:<22} {_how_many(len(rows))}")
+                print(f"    fields: {_fields(rows)}")
+                items = [i for r in rows if isinstance(r, dict) for i in (r.get("items") or [])]
+                if items:
+                    print(f"    line item fields: {_fields(items)}")
+                for f in _ENUM_FIELDS:
+                    vals = _labels(rows, f)
+                    if vals:
+                        print(f"    {f}: {vals}")
+            except ApiError as exc:
+                ok = False
+                print(f"  {name:<22} FAILED - {_err(exc)}")
+    missing = [lbl for c, (lbl, env) in STORES.items() if not config.get(env)]
+    if missing:
+        print("\nNo key set for: " + ", ".join(missing))
+    print("\nAll Dutchie checks passed." if ok else "\nSome Dutchie checks failed - see above.")
+    return 0 if ok else 1
+
+
 def cmd_schema(type_name):
     from .superbud import Superbud
     print(json.dumps(Superbud().type_fields(type_name), indent=2))
@@ -152,6 +222,8 @@ def main(argv):
         return cmd_run("--live" in rest)
     if cmd == "schema" and rest:
         return cmd_schema(rest[0]) or 0
+    if cmd == "dutchie-check":
+        return cmd_dutchie_check()
     print(__doc__)
     return 1
 
