@@ -233,6 +233,12 @@ def cmd_retail(backfill):
             rs.sync_store(code, label, client, start, now, seen=set() if backfill else None)
         except ApiError as exc:
             report.add("Retail stats", "error", f"{label}: {exc}", code=_safe_code(exc))
+    try:
+        today = now.astimezone(rs.tz).date()
+        first = start.astimezone(rs.tz).date()  # backfill: from the first history year
+        rs.month_totals({label: code for code, label, _ in stores}, first, today)
+    except ApiError as exc:
+        report.add("Retail stats", "error", f"month totals: {exc}", code=_safe_code(exc))
     text = report.render(live)
     _log(text, "retail")
     print(report.render(live, details=not config.QUIET_OUTPUT()))

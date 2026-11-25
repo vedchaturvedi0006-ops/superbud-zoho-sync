@@ -26,10 +26,16 @@ MODULE = "Retail_Sales_Stats"
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 MONEY_FIELDS = ("Net_Sales", "Gross_Sales", "Discounts", "Returns", "Tax", "Cost", "Margin", "Avg_Basket",
-                "Medical_Sales", "Rec_Sales", "Inventory_Value")
+                "Medical_Sales", "Rec_Sales", "Inventory_Value", "Prev_3M_Net_Sales", "Prev_3M_Avg_Basket")
 COUNT_FIELDS = ("Transactions", "Customers", "New_Customers", "In_Store_Sales", "Pickup_Sales",
-                "Delivery_Sales", "Days_Since_Last_Sale")
+                "Delivery_Sales", "Days_Since_Last_Sale", "Days_In_Period", "Prev_3M_Transactions",
+                "Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
 DECIMAL_FIELDS = ("Units", "Qty_On_Hand")
+ALL_STORES = "All Stores"
+# daily fields that add up into a month
+SUMMABLE = ("Net_Sales", "Gross_Sales", "Discounts", "Returns", "Tax", "Cost", "Margin", "Medical_Sales",
+            "Rec_Sales", "Transactions", "New_Customers", "In_Store_Sales", "Pickup_Sales", "Delivery_Sales",
+            "Units")
 
 
 # ------------------------------------------------------------------ helpers --
@@ -288,12 +294,15 @@ class RetailSync:
         self.report = report
         self.tz = ZoneInfo(config.get("RETAIL_TIMEZONE", "America/Phoenix"))
 
-    def existing(self, store_label, since, until, with_inventory=False):
+    def existing(self, store_label, since, until, with_inventory=False, stat_type=None):
         store = store_label.replace("'", "''")  # COQL escapes a quote by doubling it
         if with_inventory:
             where = f"(Store = '{store}') and (Stat_Type = 'Inventory')"
+        elif stat_type:
+            where = (f"((Store = '{store}') and (Stat_Type = '{stat_type}')) and "
+                     f"(Period_Start between '{since:%Y-%m-%d}' and '{until:%Y-%m-%d}')")
         else:
-            where = (f"((Store = '{store}') and (Stat_Type != 'Inventory')) and "
+            where = (f"((Store = '{store}') and (Stat_Type not in ('Inventory', 'Month Total'))) and "
                      f"(Period_Start between '{since:%Y-%m-%d}' and '{until:%Y-%m-%d}')")
         cols = "id, Stat_Key, Period_Start, Dutchie_Product_ID, " + ", ".join(MONEY_FIELDS + COUNT_FIELDS + DECIMAL_FIELDS)
         return {r["Stat_Key"]: r for r in self.z.coql_all(cols, MODULE, where=where) if r.get("Stat_Key")}
@@ -390,6 +399,66 @@ class RetailSync:
         self.report.add("Retail stats", outcome, f"{label}: {new_total} new, {upd_total} updated rows")
         return new_total, upd_total
 
+    # -------------------------------------------------------------- month totals --
+    def daily_rows(self, since, until):
+        """Daily Total rows of every store from Zoho: {(store, date): fields}."""
+        cols = "Store, Period_Start, " + ", ".join(SUMMABLE)
+        where = f"(Stat_Type = 'Daily Total') and (Period_Start between '{since:%Y-%m-%d}' and '{until:%Y-%m-%d}')"
+        out = {}
+        for r in self.z.coql_all(cols, MODULE, where=where):
+            if r.get("Store") and r.get("Period_Start"):
+                out[(r["Store"], dt.date.fromisoformat(str(r["Period_Start"])[:10]))] = r
+        return out
+
+    def month_totals(self, store_codes, first_month, today):
+        """One 'Month Total' row per store (and for all stores together) per month, with the exact
+        average order value and a comparison with the previous 3 months. The current month is
+        compared over the same days (e.g. 1-25 Nov vs 1-25 of Aug, Sep, Oct)."""
+        first_month = first_month.replace(day=1)
+        since = _add_months(first_month, -3)
+        daily = self.daily_rows(since, today)
+        by_store = defaultdict(dict)
+        for (store, day), r in daily.items():
+            by_store[store][day] = r
+            tot = by_store[ALL_STORES].setdefault(day, {})
+            for f in SUMMABLE:
+                tot[f] = num(tot.get(f)) + num(r.get(f))
+        codes = dict(store_codes, **{ALL_STORES: "all"})
+        new_total = upd_total = 0
+        for store, days in by_store.items():
+            code = codes.get(store)
+            if not code:
+                continue
+            rows = {}
+            month = first_month
+            while month <= today:
+                last_day = today.day if (month.year, month.month) == (today.year, today.month) else None
+                cur = _month_sum(days, month, last_day)
+                if cur["_days"]:
+                    prev = [_month_sum(days, _add_months(month, -k), last_day) for k in (1, 2, 3)]
+                    prev = [p for p in prev if p["_days"]]
+                    f = {k: round(cur[k], 2) for k in SUMMABLE}
+                    f["Avg_Basket"] = round(cur["Net_Sales"] / cur["Transactions"], 2) if cur["Transactions"] else 0
+                    f["Days_In_Period"] = cur["_days"]
+                    if prev:
+                        p_net = sum(p["Net_Sales"] for p in prev) / len(prev)
+                        p_tx = sum(p["Transactions"] for p in prev) / len(prev)
+                        p_aov = p_net / p_tx if p_tx else 0
+                        f.update({"Prev_3M_Net_Sales": round(p_net, 2), "Prev_3M_Transactions": round(p_tx),
+                                  "Prev_3M_Avg_Basket": round(p_aov, 2),
+                                  "Net_Sales_vs_3M_Pct": _pct(f["Net_Sales"], p_net),
+                                  "Orders_vs_3M_Pct": _pct(f["Transactions"], p_tx),
+                                  "Avg_Basket_vs_3M_Pct": _pct(f["Avg_Basket"], p_aov)})
+                    label = "month to date" if last_day else "full month"
+                    rows[f"Month Total|{month}"] = ("Month Total", month, f"{month:%b %Y} ({label})", {}, f)
+                month = _add_months(month, 1)
+            have = self.existing(store, first_month, today, stat_type="Month Total")
+            c, u = self.write(code, store, rows, have)
+            new_total += c
+            upd_total += u
+        self.report.add("Retail stats", "written" if new_total or upd_total else "unchanged",
+                        f"month totals: {new_total} new, {upd_total} updated rows")
+
     def signups(self, client, since):
         """Customer id -> local sign-up day, for customers changed since `since`."""
         try:
@@ -405,6 +474,28 @@ class RetailSync:
                     created = created.replace(tzinfo=dt.timezone.utc)
                 out[cid] = created.astimezone(self.tz).date()
         return out
+
+
+def _add_months(d, n):
+    y, m = divmod(d.month - 1 + n, 12)
+    return dt.date(d.year + y, m + 1, 1)
+
+
+def _month_sum(days, month, last_day=None):
+    """Totals of one month's daily rows (only days 1..last_day when given)."""
+    out = {k: 0.0 for k in SUMMABLE}
+    out["_days"] = 0
+    for day, r in days.items():
+        if day.year == month.year and day.month == month.month and (last_day is None or day.day <= last_day):
+            out["_days"] += 1
+            for k in SUMMABLE:
+                out[k] += num(r.get(k))
+    return out
+
+
+def _pct(cur, base):
+    """Whole-number % change (Zoho Professional allows only a few decimal fields)."""
+    return round((cur - base) / base * 100) if base else None
 
 
 def _int_or_none(v):
