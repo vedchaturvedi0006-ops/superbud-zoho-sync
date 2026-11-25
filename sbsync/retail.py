@@ -295,7 +295,7 @@ class RetailSync:
         else:
             where = (f"((Store = '{store}') and (Stat_Type != 'Inventory')) and "
                      f"(Period_Start between '{since:%Y-%m-%d}' and '{until:%Y-%m-%d}')")
-        cols = "id, Stat_Key, " + ", ".join(MONEY_FIELDS + COUNT_FIELDS + DECIMAL_FIELDS)
+        cols = "id, Stat_Key, Period_Start, Dutchie_Product_ID, " + ", ".join(MONEY_FIELDS + COUNT_FIELDS + DECIMAL_FIELDS)
         return {r["Stat_Key"]: r for r in self.z.coql_all(cols, MODULE, where=where) if r.get("Stat_Key")}
 
     def write(self, store_code, store_label, rows, have):
@@ -371,8 +371,17 @@ class RetailSync:
             upd_total += u
         try:
             today = dt.datetime.now(self.tz).date()
+            have_inv = self.existing(label, None, None, with_inventory=True)
+            # products not sold in this run's window: carry the last-sale date over from Zoho
+            for old in have_inv.values():
+                pid, days, when = old.get("Dutchie_Product_ID"), old.get("Days_Since_Last_Sale"), old.get("Period_Start")
+                if pid and days not in (None, "") and when:
+                    prev = dt.date.fromisoformat(str(when)[:10]) - dt.timedelta(days=int(days))
+                    for key in (pid, _int_or_none(pid)):
+                        if key is not None and key not in last_sold:
+                            last_sold[key] = prev
             inv = inventory_rows(client.inventory(), products, today, last_sold)
-            c, u = self.write(code, label, inv, self.existing(label, None, None, with_inventory=True))
+            c, u = self.write(code, label, inv, have_inv)
             new_total += c
             upd_total += u
         except ApiError as exc:
@@ -396,6 +405,13 @@ class RetailSync:
                     created = created.replace(tzinfo=dt.timezone.utc)
                 out[cid] = created.astimezone(self.tz).date()
         return out
+
+
+def _int_or_none(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _same(a, b):
