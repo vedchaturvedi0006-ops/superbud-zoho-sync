@@ -240,6 +240,11 @@ def cmd_retail(backfill):
         rs.month_totals({label: code for code, label, _ in stores}, first, today)
     except ApiError as exc:
         report.add("Retail stats", "error", f"month totals: {exc}", code=_safe_code(exc))
+    try:
+        from .inventory import InventorySync
+        InventorySync(zoho, report).run(stores)
+    except ApiError as exc:
+        report.add("Inventory", "error", str(exc), code=_safe_code(exc))
     text = report.render(live)
     _log(text, "retail")
     print(report.render(live, details=not config.QUIET_OUTPUT()))
