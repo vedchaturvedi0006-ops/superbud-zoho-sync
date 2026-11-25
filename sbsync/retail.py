@@ -264,13 +264,17 @@ def inventory_rows(inventory, products, today, last_sold):
     return rows
 
 
-def month_ranges(start, end):
-    """[(from, to)] whole calendar months (UTC) covering start..end."""
+def month_ranges(start, end, tz):
+    """Whole store-local calendar months covering start..end:
+    [(utc_from, utc_to, first_day, last_day)]. Months must follow the store's clock,
+    otherwise a month's last evening lands in the next window and overwrites it."""
     out = []
-    cur = dt.datetime(start.year, start.month, 1, tzinfo=dt.timezone.utc)
+    s = start.astimezone(tz)
+    cur = dt.datetime(s.year, s.month, 1, tzinfo=tz)
     while cur < end:
-        nxt = dt.datetime(cur.year + (cur.month == 12), cur.month % 12 + 1, 1, tzinfo=dt.timezone.utc)
-        out.append((max(cur, start), min(nxt, end)))
+        nxt = dt.datetime(cur.year + (cur.month == 12), cur.month % 12 + 1, 1, tzinfo=tz)
+        out.append((cur.astimezone(dt.timezone.utc), min(nxt, end).astimezone(dt.timezone.utc),
+                    cur.date(), (nxt - dt.timedelta(days=1)).date()))
         cur = nxt
     return out
 
@@ -346,7 +350,7 @@ class RetailSync:
         signups = {} if seen is not None else self.signups(client, start)
         new_total = upd_total = 0
         last_sold = {}
-        for a, b in month_ranges(start, end):
+        for a, b, la, lb in month_ranges(start, end, self.tz):
             txs = client.transactions(a, b)
             if seen is not None:
                 first = {}
@@ -361,8 +365,6 @@ class RetailSync:
             rows, sold = aggregate(txs, products, employees, {}, self.tz, first)
             for pid, d in sold.items():
                 last_sold[pid] = max(last_sold.get(pid, d), d)
-            la = a.astimezone(self.tz).date().replace(day=1)
-            lb = (b - dt.timedelta(seconds=1)).astimezone(self.tz).date()
             have = self.existing(label, la, lb)
             c, u = self.write(code, label, rows, have)
             new_total += c
