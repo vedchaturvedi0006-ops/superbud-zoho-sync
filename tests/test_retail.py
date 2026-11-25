@@ -37,8 +37,17 @@ class FakeZoho:
         self.calls = 0
 
     def coql_all(self, cols, module, where=""):
+        import re
         inv = "Stat_Type = 'Inventory'" in where
-        return [dict(r) for r in self.rows.values() if (r["Stat_Type"] == "Inventory") == inv]
+        m = re.search(r"between '([\d-]+)' and '([\d-]+)'", where)
+        out = []
+        for r in self.rows.values():
+            if (r["Stat_Type"] == "Inventory") != inv:
+                continue
+            if m and not (m.group(1) <= r["Period_Start"] <= m.group(2)):
+                continue
+            out.append(dict(r))
+        return out
 
     def create(self, module, recs):
         self.calls += 1
@@ -121,6 +130,24 @@ class RetailTests(unittest.TestCase):
         new, upd = rs.sync_store("benson", "Earth's Healing - Benson", FakeDutchie(SALES), start, end)
         self.assertEqual((new, upd), (0, 0))
         self.assertEqual(z.calls, calls)
+
+
+class MonthBoundaryTests(unittest.TestCase):
+    def test_late_evening_sale_stays_in_its_local_month(self):
+        # 05:00 UTC on 1 Oct = 22:00 on 30 Sep in Arizona
+        sales = [tx(10, "2026-09-15T18:00:00Z", [item(1, 1, 100.0)]),
+                 tx(11, "2026-10-01T05:00:00Z", [item(1, 1, 50.0)]),
+                 tx(12, "2026-10-10T18:00:00Z", [item(2, 1, 20.0)])]
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+        rs.sync_store("benson", "B", FakeDutchie(sales), dt.datetime(2026, 9, 1, 7, tzinfo=dt.timezone.utc),
+                      dt.datetime(2026, 11, 1, 7, tzinfo=dt.timezone.utc), seen=set())
+        by_key = {r["Stat_Key"]: r for r in z.rows.values()}
+        self.assertEqual(by_key["benson|Category|2026-09-01|Flower"]["Net_Sales"], 150.0)
+        self.assertEqual(by_key["benson|Daily Total|2026-09-15"]["Net_Sales"], 100.0)
+        self.assertEqual(by_key["benson|Daily Total|2026-09-30"]["Net_Sales"], 50.0)
+        self.assertEqual(by_key["benson|Category|2026-10-01|Edibles"]["Net_Sales"], 20.0)
+        self.assertNotIn("benson|Category|2026-10-01|Flower", by_key)
 
 
 if __name__ == "__main__":
