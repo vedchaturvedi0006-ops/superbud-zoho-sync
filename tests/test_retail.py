@@ -38,11 +38,16 @@ class FakeZoho:
 
     def coql_all(self, cols, module, where=""):
         import re
-        inv = "Stat_Type = 'Inventory'" in where
         m = re.search(r"between '([\d-]+)' and '([\d-]+)'", where)
+        st = re.search(r"Stat_Type = '([^']+)'", where)
+        store = re.search(r"Store = '((?:[^']|'')+)'", where)
         out = []
         for r in self.rows.values():
-            if (r["Stat_Type"] == "Inventory") != inv:
+            if st and r["Stat_Type"] != st.group(1):
+                continue
+            if not st and r["Stat_Type"] in ("Inventory", "Month Total"):
+                continue
+            if store and r.get("Store") != store.group(1).replace("''", "'"):
                 continue
             if m and not (m.group(1) <= r["Period_Start"] <= m.group(2)):
                 continue
@@ -145,6 +150,35 @@ class SlowMoverTests(unittest.TestCase):
         today = dt.datetime.now(rs.tz).date()
         expected = (today - (dt.date(2026, 11, 1) - dt.timedelta(days=40))).days
         self.assertEqual(z.rows["1"]["Days_Since_Last_Sale"], expected)
+
+
+class MonthTotalTests(unittest.TestCase):
+    def test_exact_aov_and_same_day_comparison(self):
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+
+        def day(store, d, net, tx):
+            k = f"{store}|{d}"
+            z.rows[k] = {"id": k, "Stat_Key": k, "Store": store, "Stat_Type": "Daily Total", "Period_Start": d,
+                         "Net_Sales": net, "Transactions": tx}
+        # Aug-Oct: 1st-10th = 100/day with 2 orders; 11th onwards = 1000/day (should not count for Nov MTD)
+        for m in ("08", "09", "10"):
+            for dd in range(1, 29):
+                day("Earth's Healing - Benson", f"2026-{m}-{dd:02d}", 100 if dd <= 10 else 1000, 2)
+        for dd in range(1, 11):
+            day("Earth's Healing - Benson", f"2026-11-{dd:02d}", 150, 2)
+            day("Earth's Healing - River", f"2026-11-{dd:02d}", 50, 1)
+        rs.month_totals({"Earth's Healing - Benson": "benson", "Earth's Healing - River": "river"},
+                        dt.date(2026, 11, 1), dt.date(2026, 11, 10))
+        mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
+        b = mt["benson|Month Total|2026-11-01"]
+        self.assertEqual((b["Net_Sales"], b["Transactions"], b["Avg_Basket"], b["Days_In_Period"]), (1500, 20, 75.0, 10))
+        self.assertEqual(b["Prev_3M_Net_Sales"], 1000)       # same 10 days of Aug/Sep/Oct
+        self.assertEqual(b["Net_Sales_vs_3M_Pct"], 50)
+        self.assertEqual(b["Avg_Basket_vs_3M_Pct"], 50)        # 75 vs 50
+        a = mt["all|Month Total|2026-11-01"]
+        self.assertEqual((a["Store"], a["Net_Sales"], a["Transactions"], a["Avg_Basket"]), ("All Stores", 2000, 30, 66.67))
+        self.assertIsNone(mt["river|Month Total|2026-11-01"].get("Net_Sales_vs_3M_Pct"))  # no River history
 
 
 class MonthBoundaryTests(unittest.TestCase):
