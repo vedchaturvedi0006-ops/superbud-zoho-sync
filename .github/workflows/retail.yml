@@ -1,0 +1,41 @@
+name: Dutchie sales to Zoho
+
+on:
+  schedule:
+    - cron: "23 */2 * * *"      # every 2 hours
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Load ALL sales history (first time only, takes longer)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: dutchie-retail-stats
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  retail:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Dutchie sales -> Zoho Retail Sales Stats
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          DUTCHIE_KEY_BENSON: ${{ secrets.DUTCHIE_KEY_BENSON }}
+          DUTCHIE_KEY_RIVER: ${{ secrets.DUTCHIE_KEY_RIVER }}
+          LIVE: ${{ vars.LIVE || 'false' }}
+          RETAIL_TIMEZONE: ${{ vars.RETAIL_TIMEZONE || 'America/Phoenix' }}
+          QUIET_OUTPUT: "true"       # public logs: counts only, no names or money
+        run: python -m sbsync retail ${{ inputs.backfill && '--backfill' || '' }}
