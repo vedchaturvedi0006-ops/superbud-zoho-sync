@@ -183,6 +183,33 @@ class MonthTotalTests(unittest.TestCase):
         self.assertIsNone(mt["river|Month Total|2026-11-01"].get("Net_Sales_vs_3M_Pct"))  # no River history
 
 
+class PartialHistoryTests(unittest.TestCase):
+    def test_partial_first_month_is_not_a_baseline(self):
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+
+        def day(d, net, tx):
+            k = f"b|{d}"
+            z.rows[k] = {"id": k, "Stat_Key": k, "Store": "S", "Stat_Type": "Daily Total", "Period_Start": d,
+                         "Net_Sales": net, "Transactions": tx}
+        for dd in (28, 29, 30):           # history starts 28 June
+            day(f"2026-06-{dd}", 100, 1)
+        for dd in range(1, 32):
+            day(f"2026-07-{dd:02d}", 100, 1)
+        for dd in range(1, 11):           # August so far: 1-10 (today is the 11th, no sales yet)
+            day(f"2026-08-{dd:02d}", 120, 1)
+        rs.month_totals({"S": "s"}, dt.date(2026, 6, 1), dt.date(2026, 8, 11))
+        mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
+        self.assertIsNone(mt["s|Month Total|2026-07-01"].get("Net_Sales_vs_3M_Pct"))   # June too short
+        # a stale value from an older run is cleared
+        z.rows[[k for k, r in z.rows.items() if r.get("Stat_Key") == "s|Month Total|2026-07-01"][0]]["Net_Sales_vs_3M_Pct"] = 946
+        rs.month_totals({"S": "s"}, dt.date(2026, 6, 1), dt.date(2026, 8, 11))
+        mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
+        self.assertIsNone(mt["s|Month Total|2026-07-01"]["Net_Sales_vs_3M_Pct"])
+        aug = mt["s|Month Total|2026-08-01"]
+        self.assertEqual((aug["Days_In_Period"], aug["Prev_3M_Net_Sales"], aug["Net_Sales_vs_3M_Pct"]), (10, 1000, 20))
+
+
 class MonthBoundaryTests(unittest.TestCase):
     def test_late_evening_sale_stays_in_its_local_month(self):
         # 05:00 UTC on 1 Oct = 22:00 on 30 Sep in Arizona
