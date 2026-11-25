@@ -59,6 +59,11 @@ class Dutchie:
     def inventory(self):
         return self._get("/reporting/inventory") or []
 
+    def customers(self, since):
+        """Customers changed since `since` (only id, sign-up date and type are used)."""
+        return self._get("/reporting/customers", fromLastModifiedDateUTC=since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         includeAnonymous="false") or []
+
     def employees(self):
         return self._get("/employees") or []
 

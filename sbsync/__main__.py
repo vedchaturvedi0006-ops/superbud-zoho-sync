@@ -6,6 +6,8 @@
   python -m sbsync run --live          run and write to Zoho, this run only
   python -m sbsync schema Order        show the real fields of a Superbud type
   python -m sbsync dutchie-check       test the Dutchie store keys (reads only)
+  python -m sbsync retail              Dutchie sales -> Zoho "Retail Sales Stats" (this month)
+  python -m sbsync retail --backfill   same, for all history Dutchie has
 """
 import datetime as dt
 import json
@@ -204,6 +206,39 @@ def cmd_dutchie_check():
     return 0 if ok else 1
 
 
+def cmd_retail(backfill):
+    from .dutchie import configured_stores
+    from .retail import RetailSync
+    from .sync import Report
+    from .zoho import Zoho
+    live = config.LIVE()
+    stores = configured_stores()
+    if not stores:
+        print("No Dutchie keys set (DUTCHIE_KEY_BENSON / DUTCHIE_KEY_RIVER).")
+        return 1
+    report = Report()
+    zoho = Zoho(live=live)
+    rs = RetailSync(zoho, report)
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    if backfill:
+        start = dt.datetime(int(config.get("RETAIL_HISTORY_FROM_YEAR", "2018")), 1, 1, tzinfo=dt.timezone.utc)
+    else:
+        local_today = now.astimezone(rs.tz)
+        first = local_today.replace(day=1, hour=0, minute=0, second=0)
+        if local_today.day <= 3:  # late returns/edits for last month
+            first = (first - dt.timedelta(days=1)).replace(day=1)
+        start = first.astimezone(dt.timezone.utc)
+    for code, label, client in stores:
+        try:
+            rs.sync_store(code, label, client, start, now, seen=set() if backfill else None)
+        except ApiError as exc:
+            report.add("Retail stats", "error", f"{label}: {exc}", code=_safe_code(exc))
+    text = report.render(live)
+    _log(text, "retail")
+    print(report.render(live, details=not config.QUIET_OUTPUT()))
+    return 1 if any(k.endswith(": error") for k in report.counts) else 0
+
+
 def cmd_schema(type_name):
     from .superbud import Superbud
     print(json.dumps(Superbud().type_fields(type_name), indent=2))
@@ -224,6 +259,8 @@ def main(argv):
         return cmd_schema(rest[0]) or 0
     if cmd == "dutchie-check":
         return cmd_dutchie_check()
+    if cmd == "retail":
+        return cmd_retail("--backfill" in rest)
     print(__doc__)
     return 1
 
