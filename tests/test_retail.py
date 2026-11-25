@@ -132,6 +132,21 @@ class RetailTests(unittest.TestCase):
         self.assertEqual(z.calls, calls)
 
 
+class SlowMoverTests(unittest.TestCase):
+    def test_days_since_last_sale_keeps_counting(self):
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+        z.rows["1"] = {"id": "1", "Stat_Key": "benson|Inventory|1", "Stat_Type": "Inventory", "Store": "B",
+                       "Period_Start": "2026-11-01", "Dutchie_Product_ID": "1", "Days_Since_Last_Sale": 40,
+                       "Qty_On_Hand": 12, "Inventory_Value": 120}
+        # this month: product 1 not sold at all
+        rs.sync_store("benson", "B", FakeDutchie([]), dt.datetime(2026, 11, 1, 7, tzinfo=dt.timezone.utc),
+                      dt.datetime(2026, 11, 20, tzinfo=dt.timezone.utc))
+        today = dt.datetime.now(rs.tz).date()
+        expected = (today - (dt.date(2026, 11, 1) - dt.timedelta(days=40))).days
+        self.assertEqual(z.rows["1"]["Days_Since_Last_Sale"], expected)
+
+
 class MonthBoundaryTests(unittest.TestCase):
     def test_late_evening_sale_stays_in_its_local_month(self):
         # 05:00 UTC on 1 Oct = 22:00 on 30 Sep in Arizona
