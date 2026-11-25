@@ -173,6 +173,8 @@ class MonthTotalTests(unittest.TestCase):
         mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
         b = mt["benson|Month Total|2026-11-01"]
         self.assertEqual((b["Net_Sales"], b["Transactions"], b["Avg_Basket"], b["Days_In_Period"]), (1500, 20, 75.0, 10))
+        for k in ("Transactions", "Prev_3M_Transactions", "Days_In_Period", "Net_Sales_vs_3M_Pct"):
+            self.assertIsInstance(b[k], int, k)  # Zoho integer fields reject 20.0
         self.assertEqual(b["Prev_3M_Net_Sales"], 1000)       # same 10 days of Aug/Sep/Oct
         self.assertEqual(b["Net_Sales_vs_3M_Pct"], 50)
         self.assertEqual(b["Avg_Basket_vs_3M_Pct"], 50)        # 75 vs 50
