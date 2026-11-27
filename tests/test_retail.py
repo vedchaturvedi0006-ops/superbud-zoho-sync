@@ -228,5 +228,41 @@ class MonthBoundaryTests(unittest.TestCase):
         self.assertNotIn("benson|Category|2026-10-01|Flower", by_key)
 
 
+class StoreGroupTests(unittest.TestCase):
+    def test_brand_and_arizona_totals(self):
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+        stores = {"Earth's Healing - Benson": ("benson", 100), "Earth's Healing - River": ("river", 50),
+                  "D2 - Downtown": ("downtown", 30), "D2 - Eastside": ("eastside", 20)}
+        for store, (_, net) in stores.items():
+            for dd in range(1, 6):
+                k = f"{store}|{dd}"
+                z.rows[k] = {"id": k, "Stat_Key": k, "Store": store, "Stat_Type": "Daily Total",
+                             "Period_Start": f"2026-11-{dd:02d}", "Net_Sales": net, "Transactions": 1}
+        # a stray combined daily row must not be counted twice
+        z.rows["x"] = {"id": "x", "Stat_Key": "x", "Store": "All Stores", "Stat_Type": "Daily Total",
+                       "Period_Start": "2026-11-01", "Net_Sales": 9999, "Transactions": 9}
+        rs.month_totals({s: c for s, (c, _) in stores.items()}, dt.date(2026, 11, 1), dt.date(2026, 11, 5))
+        mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
+        self.assertEqual((mt["all|Month Total|2026-11-01"]["Store"], mt["all|Month Total|2026-11-01"]["Net_Sales"]),
+                         ("All Stores", 750))
+        self.assertEqual((mt["d2all|Month Total|2026-11-01"]["Store"], mt["d2all|Month Total|2026-11-01"]["Net_Sales"]),
+                         ("D2 - All Stores", 250))
+        az = mt["az|Month Total|2026-11-01"]
+        self.assertEqual((az["Store"], az["Net_Sales"], az["Transactions"], az["Avg_Basket"]),
+                         ("Arizona - All Stores", 1000, 20, 50.0))
+
+    def test_earths_healing_only_has_no_arizona_row(self):
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+        for store in ("Earth's Healing - Benson", "Earth's Healing - River"):
+            z.rows[store] = {"id": store, "Stat_Key": store, "Store": store, "Stat_Type": "Daily Total",
+                             "Period_Start": "2026-11-01", "Net_Sales": 10, "Transactions": 1}
+        rs.month_totals({"Earth's Healing - Benson": "benson", "Earth's Healing - River": "river"},
+                        dt.date(2026, 11, 1), dt.date(2026, 11, 1))
+        stores = {r["Store"] for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
+        self.assertEqual(stores, {"Earth's Healing - Benson", "Earth's Healing - River", "All Stores"})
+
+
 if __name__ == "__main__":
     unittest.main()
