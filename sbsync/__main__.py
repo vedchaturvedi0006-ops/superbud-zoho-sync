@@ -166,7 +166,7 @@ def cmd_dutchie_check():
     from .dutchie import STORES, configured_stores, utc_days_ago
     stores = configured_stores()
     if not stores:
-        print("No Dutchie keys set. Add DUTCHIE_KEY_BENSON and DUTCHIE_KEY_RIVER as secrets.")
+        print("No Dutchie keys set. Add DUTCHIE_KEY_BENSON, DUTCHIE_KEY_RIVER, DUTCHIE_KEY_DOWNTOWN, DUTCHIE_KEY_EASTSIDE as secrets.")
         return 1
     ok = True
     for code, label, d in stores:
@@ -206,7 +206,7 @@ def cmd_dutchie_check():
     return 0 if ok else 1
 
 
-def cmd_retail(backfill):
+def cmd_retail(backfill, only=None):
     from .dutchie import configured_stores
     from .retail import RetailSync
     from .sync import Report
@@ -214,7 +214,7 @@ def cmd_retail(backfill):
     live = config.LIVE()
     stores = configured_stores()
     if not stores:
-        print("No Dutchie keys set (DUTCHIE_KEY_BENSON / DUTCHIE_KEY_RIVER).")
+        print("No Dutchie keys set (DUTCHIE_KEY_BENSON / RIVER / DOWNTOWN / EASTSIDE).")
         return 1
     report = Report()
     zoho = Zoho(live=live)
@@ -229,6 +229,8 @@ def cmd_retail(backfill):
             first = (first - dt.timedelta(days=1)).replace(day=1)
         start = first.astimezone(dt.timezone.utc)
     for code, label, client in stores:
+        if only and code not in only:
+            continue  # e.g. backfill just the newly added stores
         try:
             rs.sync_store(code, label, client, start, now, seen=set() if backfill else None)
         except ApiError as exc:
@@ -272,7 +274,8 @@ def main(argv):
     if cmd == "dutchie-check":
         return cmd_dutchie_check()
     if cmd == "retail":
-        return cmd_retail("--backfill" in rest)
+        only = next((a.split("=", 1)[1] for a in rest if a.startswith("--stores=")), "")
+        return cmd_retail("--backfill" in rest, {c.strip() for c in only.split(",") if c.strip()} or None)
     print(__doc__)
     return 1
 

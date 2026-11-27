@@ -420,13 +420,28 @@ class RetailSync:
         first_month = first_month.replace(day=1)
         since = _add_months(first_month, -3)
         daily = self.daily_rows(since, today)
+        from .dutchie import ARIZONA, GROUPS, group_of
+        codes = dict(store_codes)
+        totals_of = {}  # store label -> combined labels it adds into
+        for label, code in store_codes.items():
+            grp = group_of(code)
+            if grp:
+                gcode, glabel, members = GROUPS[grp]
+                if sum(1 for c in store_codes.values() if c in members) > 1:
+                    codes[glabel] = gcode
+                    totals_of.setdefault(label, []).append(glabel)
+            if len(store_codes) > 1 and len({group_of(c) for c in store_codes.values()}) > 1:
+                codes[ARIZONA[1]] = ARIZONA[0]
+                totals_of.setdefault(label, []).append(ARIZONA[1])
         by_store = defaultdict(dict)
         for (store, day), r in daily.items():
+            if store not in store_codes:
+                continue  # combined rows are rebuilt from the single stores
             by_store[store][day] = r
-            tot = by_store[ALL_STORES].setdefault(day, {})
-            for f in SUMMABLE:
-                tot[f] = num(tot.get(f)) + num(r.get(f))
-        codes = dict(store_codes, **{ALL_STORES: "all"})
+            for combined in totals_of.get(store, []):
+                tot = by_store[combined].setdefault(day, {})
+                for f in SUMMABLE:
+                    tot[f] = num(tot.get(f)) + num(r.get(f))
         new_total = upd_total = 0
         for store, days in by_store.items():
             code = codes.get(store)

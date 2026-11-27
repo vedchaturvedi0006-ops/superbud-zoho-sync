@@ -3,6 +3,8 @@
 Keys come from the environment only (.env on the PC, GitHub Secrets on GitHub):
   DUTCHIE_KEY_BENSON   Earth's Healing - Benson
   DUTCHIE_KEY_RIVER    Earth's Healing - River
+  DUTCHIE_KEY_DOWNTOWN D2 - Downtown
+  DUTCHIE_KEY_EASTSIDE D2 - Eastside
 """
 import datetime as dt
 
@@ -14,7 +16,25 @@ BASE = "https://api.pos.dutchie.com"
 STORES = {
     "benson": ("Earth's Healing - Benson", "DUTCHIE_KEY_BENSON"),
     "river": ("Earth's Healing - River", "DUTCHIE_KEY_RIVER"),
+    "downtown": ("D2 - Downtown", "DUTCHIE_KEY_DOWNTOWN"),
+    "eastside": ("D2 - Eastside", "DUTCHIE_KEY_EASTSIDE"),
 }
+
+# store group -> (code used in record keys, Store value of the combined rows, member store codes)
+# Earth's Healing keeps "All Stores" so the existing dashboards keep working.
+GROUPS = {
+    "eh": ("all", "All Stores", ("benson", "river")),
+    "d2": ("d2all", "D2 - All Stores", ("downtown", "eastside")),
+}
+# every store in Arizona together (sales month totals only)
+ARIZONA = ("az", "Arizona - All Stores")
+
+
+def group_of(code):
+    for g, (_, _, members) in GROUPS.items():
+        if code in members:
+            return g
+    return None
 
 
 def configured_stores():

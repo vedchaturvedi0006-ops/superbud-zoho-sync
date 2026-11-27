@@ -1,7 +1,7 @@
 """Dutchie products + stock + recent sales -> Zoho "Store Inventory", with a 3-week forecast.
 
 One record per product per store, plus one per product for both stores together
-("All Stores", matched by SKU, else by product name). Each record carries the product
+(Earth's Healing "All Stores", "D2 - All Stores"; matched by SKU, else by product name). Each record carries the product
 details from Dutchie (SKU, category, type, brand, vendor, strain, THC/CBD, size, price,
 cost), stock on hand, units sold in the last 7/30/90 days, and a forecast:
 
@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from . import config
 from .http import ApiError
-from .retail import ALL_STORES, g, local_time, num, _same
+from .retail import g, local_time, num, _same
 
 MODULE = "Store_Inventory"
 HISTORY_DAYS = 90
@@ -279,10 +279,13 @@ class InventorySync:
                     cur = nxt
                 rows = store_rows(client.products(), client.inventory(), txs, tz, today)
                 self.write(code, label, rows)
-                per_store.append(rows)
+                per_store.append((code, rows))
             except ApiError as exc:
                 from .sync import safe_code
                 self.report.add("Inventory", "error", f"{label}: {exc}", code=safe_code(exc))
-        if len(per_store) > 1:
-            today = dt.datetime.now(tz).date()
-            self.write("all", ALL_STORES, combine(per_store, today))
+        from .dutchie import GROUPS
+        today = dt.datetime.now(tz).date()
+        for gcode, glabel, members in GROUPS.values():  # e.g. Benson + River, Downtown + Eastside
+            group = [rows for code, rows in per_store if code in members]
+            if len(group) > 1:
+                self.write(gcode, glabel, combine(group, today))
