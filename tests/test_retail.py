@@ -129,8 +129,8 @@ class RetailTests(unittest.TestCase):
         new, upd = rs.sync_store("benson", "Earth's Healing - Benson", FakeDutchie(SALES), start, end)
         self.assertGreater(new, 5)
         inv = [r for r in z.rows.values() if r["Stat_Type"] == "Inventory"][0]
-        self.assertEqual((inv["Qty_On_Hand"], inv["Inventory_Value"], inv["Days_Since_Last_Sale"] is not None),
-                         (12.0, 120.0, True))
+        self.assertEqual((inv["Qty_On_Hand"], inv.get("Inventory_Value"), inv["Days_Since_Last_Sale"] is not None),
+                         (12.0, None, True))  # Inventory_Value now holds Month Total AOV
         calls = z.calls
         new, upd = rs.sync_store("benson", "Earth's Healing - Benson", FakeDutchie(SALES), start, end)
         self.assertEqual((new, upd), (0, 0))
@@ -153,7 +153,7 @@ class SlowMoverTests(unittest.TestCase):
 
 
 class MonthTotalTests(unittest.TestCase):
-    def test_exact_aov_and_same_day_comparison(self):
+    def test_exact_aov_previous_months_and_projection(self):
         z, rep = FakeZoho(), Report()
         rs = retail.RetailSync(z, rep)
 
@@ -161,26 +161,31 @@ class MonthTotalTests(unittest.TestCase):
             k = f"{store}|{d}"
             z.rows[k] = {"id": k, "Stat_Key": k, "Store": store, "Stat_Type": "Daily Total", "Period_Start": d,
                          "Net_Sales": net, "Transactions": tx}
-        # Aug-Oct: 1st-10th = 100/day with 2 orders; 11th onwards = 1000/day (should not count for Nov MTD)
-        for m in ("08", "09", "10"):
-            for dd in range(1, 29):
-                day("Earth's Healing - Benson", f"2026-{m}-{dd:02d}", 100 if dd <= 10 else 1000, 2)
-        for dd in range(1, 11):
+        for m, net in (("08", 100), ("09", 200), ("10", 300)):
+            for dd in range(1, 32 if m != "09" else 31):
+                day("Earth's Healing - Benson", f"2026-{m}-{dd:02d}", net, 2)
+        for dd in range(1, 11):   # Nov 1-10 finished, today (11th) has a partial day
             day("Earth's Healing - Benson", f"2026-11-{dd:02d}", 150, 2)
             day("Earth's Healing - River", f"2026-11-{dd:02d}", 50, 1)
+        day("Earth's Healing - Benson", "2026-11-11", 15, 1)
         rs.month_totals({"Earth's Healing - Benson": "benson", "Earth's Healing - River": "river"},
-                        dt.date(2026, 11, 1), dt.date(2026, 11, 10))
+                        dt.date(2026, 10, 1), dt.date(2026, 11, 11))
         mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
         b = mt["benson|Month Total|2026-11-01"]
-        self.assertEqual((b["Net_Sales"], b["Transactions"], b["Avg_Basket"], b["Days_In_Period"]), (1500, 20, 75.0, 10))
-        for k in ("Transactions", "Prev_3M_Transactions", "Days_In_Period", "Net_Sales_vs_3M_Pct"):
+        self.assertEqual((b["Net_Sales"], b["Transactions"], b["Days_In_Period"]), (1515, 21, 11))
+        self.assertAlmostEqual(b["Avg_Basket"], 72.14)
+        self.assertEqual((b["Net_Sales_1_Month_Ago"], b["Net_Sales_2_Months_Ago"], b["Net_Sales_3_Months_Ago"]),
+                         (9300, 6000, 3100))                       # Oct, Sep, Aug in full
+        self.assertEqual((b["Orders_1_Month_Ago"], b["Prev_3M_Avg_Basket"]), (62, 150.0))   # Oct AOV
+        self.assertEqual(b["Prev_3M_Transactions"], 4500)          # projected: 150/day x 30
+        self.assertEqual(b["Projected_Orders"], 60)
+        for k in ("Transactions", "Net_Sales_1_Month_Ago", "Orders_1_Month_Ago", "Prev_3M_Transactions"):
             self.assertIsInstance(b[k], int, k)  # Zoho integer fields reject 20.0
-        self.assertEqual(b["Prev_3M_Net_Sales"], 1000)       # same 10 days of Aug/Sep/Oct
-        self.assertEqual(b["Net_Sales_vs_3M_Pct"], 50)
-        self.assertEqual(b["Avg_Basket_vs_3M_Pct"], 50)        # 75 vs 50
+        oct_ = mt["benson|Month Total|2026-10-01"]
+        self.assertEqual(oct_["Prev_3M_Transactions"], oct_["Net_Sales"])  # finished month: projection = actual
         a = mt["all|Month Total|2026-11-01"]
-        self.assertEqual((a["Store"], a["Net_Sales"], a["Transactions"], a["Avg_Basket"]), ("All Stores", 2000, 30, 66.67))
-        self.assertIsNone(mt["river|Month Total|2026-11-01"].get("Net_Sales_vs_3M_Pct"))  # no River history
+        self.assertEqual((a["Store"], a["Net_Sales"], a["Transactions"]), ("All Stores", 2015, 31))
+        self.assertIsNone(mt["river|Month Total|2026-11-01"].get("Net_Sales_1_Month_Ago"))  # no River history
 
 
 class PartialHistoryTests(unittest.TestCase):
@@ -200,14 +205,15 @@ class PartialHistoryTests(unittest.TestCase):
             day(f"2026-08-{dd:02d}", 120, 1)
         rs.month_totals({"S": "s"}, dt.date(2026, 6, 1), dt.date(2026, 8, 11))
         mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
-        self.assertIsNone(mt["s|Month Total|2026-07-01"].get("Net_Sales_vs_3M_Pct"))   # June too short
+        self.assertIsNone(mt["s|Month Total|2026-07-01"].get("Net_Sales_1_Month_Ago"))   # June too short
         # a stale value from an older run is cleared
         z.rows[[k for k, r in z.rows.items() if r.get("Stat_Key") == "s|Month Total|2026-07-01"][0]]["Net_Sales_vs_3M_Pct"] = 946
         rs.month_totals({"S": "s"}, dt.date(2026, 6, 1), dt.date(2026, 8, 11))
         mt = {r["Stat_Key"]: r for r in z.rows.values() if r.get("Stat_Type") == "Month Total"}
         self.assertIsNone(mt["s|Month Total|2026-07-01"]["Net_Sales_vs_3M_Pct"])
         aug = mt["s|Month Total|2026-08-01"]
-        self.assertEqual((aug["Days_In_Period"], aug["Prev_3M_Net_Sales"], aug["Net_Sales_vs_3M_Pct"]), (10, 1000, 20))
+        self.assertEqual((aug["Days_In_Period"], aug["Net_Sales_1_Month_Ago"], aug["Prev_3M_Transactions"]),
+                         (10, 3100, 3720))   # July in full; 120/day x 31
 
 
 class MonthBoundaryTests(unittest.TestCase):
