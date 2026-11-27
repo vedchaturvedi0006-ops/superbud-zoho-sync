@@ -118,14 +118,13 @@ class RetailTests(unittest.TestCase):
         self.assertEqual(d["New_Customers"], 1)
         r = rows["Daily Total|2026-11-11"][4]
         self.assertEqual((r["Net_Sales"], r["Returns"], r["Transactions"]), (-20.0, 20.0, 0))
-        cats = [v[4] for k, v in rows.items() if k.startswith("Category|") and k.endswith("|Edibles")]
-        self.assertEqual((sum(c["Net_Sales"] for c in cats), sum(c["Units"] for c in cats)), (60.0, 3.0))
-        self.assertTrue(all(v[1].day != 1 for k, v in rows.items() if k.startswith("Category|")))  # per day
-        prod = rows["Product|2026-11-01|1"]                                  # products stay monthly
+        cat = rows["Category|2026-11-01|Edibles"][4]
+        self.assertEqual((cat["Net_Sales"], cat["Units"]), (60.0, 3.0))  # 20 + 60 - 20 returned
+        prod = rows["Product|2026-11-01|1"]
         self.assertEqual(prod[2], "Blue Dream 3.5g")
         self.assertEqual(prod[3]["Product_Type"], "Eighths")
-        self.assertTrue(any(k.startswith("Budtender|2026-11-") and k.endswith("|Alex Budtender") for k in rows))
-        self.assertIn("Hour|2026-11-10|Tue 10:00", rows)  # 17:00Z = 10:00 Phoenix
+        self.assertIn("Budtender|2026-11-01|Alex Budtender", rows)
+        self.assertIn("Hour|2026-11-01|Tue 10:00", rows)  # 17:00Z = 10:00 Phoenix
 
     def test_sync_writes_once_then_nothing(self):
         z, rep = FakeZoho(), Report()
@@ -188,19 +187,11 @@ class MonthTotalTests(unittest.TestCase):
         self.assertEqual(b["Net_Sales_vs_3M_Pct"], 0)             # "New Customers 1 Month Ago" (none in data)
         cmp_ = {r["Dimension"]: r for r in z.rows.values()
                 if r.get("Stat_Type") == "Month Compare" and r["Store"] == "Earth's Healing - Benson"
-                and r["Period_Start"] == "2026-11-11"}
+                and r["Period_Start"] == "2026-11-01"}
         self.assertEqual(sorted(cmp_), ["2026-08 Aug", "2026-09 Sep", "2026-10 Oct", "2026-11 Nov"])
         self.assertEqual((cmp_["2026-10 Oct"]["Net_Sales"], cmp_["2026-10 Oct"]["Transactions"],
                           cmp_["2026-10 Oct"]["Avg_Basket"]), (9300, 62, 150.0))
-        self.assertEqual(cmp_["2026-11 Nov"]["Net_Sales"], 1515)              # month to date on the 11th
-        self.assertEqual(cmp_["2026-11 Nov"]["Prev_3M_Transactions"], 4500)   # projection on the latest day
-        nov5 = [r for r in z.rows.values() if r.get("Stat_Type") == "Month Compare" and r["Store"] ==
-                "Earth's Healing - Benson" and r["Period_Start"] == "2026-11-05" and r["Dimension"] == "2026-11 Nov"][0]
-        self.assertEqual(nov5["Net_Sales"], 750)                              # month to date on the 5th
-        self.assertIsNone(nov5.get("Prev_3M_Transactions"))
-        oct31 = [r for r in z.rows.values() if r.get("Stat_Type") == "Month Compare" and r["Store"] ==
-                 "Earth's Healing - Benson" and r["Period_Start"] == "2026-10-31" and r["Dimension"] == "2026-10 Oct"][0]
-        self.assertEqual((oct31["Net_Sales"], oct31["Prev_3M_Transactions"]), (9300, 9300))  # finished month
+        self.assertEqual(cmp_["2026-11 Nov"]["Net_Sales"], 1515)
         for k in ("Transactions", "Net_Sales_1_Month_Ago", "Orders_1_Month_Ago", "Prev_3M_Transactions"):
             self.assertIsInstance(b[k], int, k)  # Zoho integer fields reject 20.0
         oct_ = mt["benson|Month Total|2026-10-01"]
@@ -262,25 +253,11 @@ class MonthBoundaryTests(unittest.TestCase):
         rs.sync_store("benson", "B", FakeDutchie(sales), dt.datetime(2026, 9, 1, 7, tzinfo=dt.timezone.utc),
                       dt.datetime(2026, 11, 1, 7, tzinfo=dt.timezone.utc), seen=set())
         by_key = {r["Stat_Key"]: r for r in z.rows.values()}
-        self.assertEqual(by_key["benson|Category|2026-09-15|Flower"]["Net_Sales"], 100.0)
-        self.assertEqual(by_key["benson|Category|2026-09-30|Flower"]["Net_Sales"], 50.0)
+        self.assertEqual(by_key["benson|Category|2026-09-01|Flower"]["Net_Sales"], 150.0)
         self.assertEqual(by_key["benson|Daily Total|2026-09-15"]["Net_Sales"], 100.0)
         self.assertEqual(by_key["benson|Daily Total|2026-09-30"]["Net_Sales"], 50.0)
-        self.assertEqual(by_key["benson|Category|2026-10-10|Edibles"]["Net_Sales"], 20.0)
+        self.assertEqual(by_key["benson|Category|2026-10-01|Edibles"]["Net_Sales"], 20.0)
         self.assertNotIn("benson|Category|2026-10-01|Flower", by_key)
-
-    def test_old_month_level_rows_are_deleted(self):
-        sales = [tx(10, "2026-09-15T18:00:00Z", [item(1, 1, 100.0)])]
-        z, rep = FakeZoho(), Report()
-        z.rows["old"] = {"id": "old", "Stat_Key": "benson|Category|2026-09-01|Edibles", "Store": "B",
-                         "Stat_Type": "Category", "Period_Start": "2026-09-01", "Net_Sales": 999}
-        z.rows["oldday"] = {"id": "oldday", "Stat_Key": "benson|Daily Total|2026-09-02", "Store": "B",
-                            "Stat_Type": "Daily Total", "Period_Start": "2026-09-02", "Net_Sales": 5}
-        retail.RetailSync(z, rep).sync_store("benson", "B", FakeDutchie(sales),
-                                             dt.datetime(2026, 9, 1, 7, tzinfo=dt.timezone.utc),
-                                             dt.datetime(2026, 10, 1, 7, tzinfo=dt.timezone.utc), seen=set())
-        self.assertNotIn("old", z.rows)                     # month-level detail row removed
-        self.assertEqual(z.rows["oldday"]["Net_Sales"], 0)  # a daily total with no sales is zeroed
 
 
 class StoreGroupTests(unittest.TestCase):
@@ -331,3 +308,16 @@ class NeverSoldTests(unittest.TestCase):
         rows = retail.inventory_rows(inv, [], today, {1: dt.date(2026, 11, 20)}, dt.date(2026, 6, 26))
         days = {r[3]["Dutchie_Product_ID"]: r[4]["Days_Since_Last_Sale"] for r in rows.values()}
         self.assertEqual(days, {"1": 7, "2": 154})
+
+
+class LeftoverDailyRowTests(unittest.TestCase):
+    def test_leftover_daily_detail_rows_are_deleted(self):
+        sales = [tx(10, "2026-09-15T18:00:00Z", [item(1, 1, 100.0)])]
+        z, rep = FakeZoho(), Report()
+        z.rows["daily"] = {"id": "daily", "Stat_Key": "benson|Category|2026-09-15|Flower", "Store": "B",
+                           "Stat_Type": "Category", "Period_Start": "2026-09-15", "Net_Sales": 100}
+        retail.RetailSync(z, rep).sync_store("benson", "B", FakeDutchie(sales),
+                                             dt.datetime(2026, 9, 1, 7, tzinfo=dt.timezone.utc),
+                                             dt.datetime(2026, 10, 1, 7, tzinfo=dt.timezone.utc), seen=set())
+        self.assertNotIn("daily", z.rows)
+        self.assertIn("benson|Category|2026-09-01|Flower", {r["Stat_Key"] for r in z.rows.values()})
