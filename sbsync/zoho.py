@@ -52,8 +52,16 @@ class Zoho:
         return self._token
 
     def _call(self, method, path, **kwargs):
-        headers = {"Authorization": f"Zoho-oauthtoken {self._access_token()}"}
-        resp = request(method, f"{config.ZOHO_API_DOMAIN()}/crm/v8{path}", headers=headers, **kwargs)
+        for attempt in range(3):
+            headers = {"Authorization": f"Zoho-oauthtoken {self._access_token()}"}
+            resp = request(method, f"{config.ZOHO_API_DOMAIN()}/crm/v8{path}", headers=headers, **kwargs)
+            # Zoho drops older access tokens once too many are issued from the same refresh token
+            # (the 2-minute Superbud sync shares it), so long runs can lose their token: get a new one.
+            if resp.status_code == 401 and attempt < 2:
+                self._token = None
+                time.sleep(2)
+                continue
+            break
         if resp.status_code == 204:
             return {}
         try:
