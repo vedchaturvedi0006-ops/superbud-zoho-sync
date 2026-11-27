@@ -13,6 +13,10 @@ on:
         description: "Only these stores for the sales pull, e.g. downtown,eastside (empty = all)"
         type: string
         default: ""
+      from_year:
+        description: "Backfill: first year to load (e.g. 2026 for this year only; empty = 2018)"
+        type: string
+        default: ""
 
 concurrency:
   group: dutchie-retail-stats
@@ -45,4 +49,5 @@ jobs:
           RETAIL_TIMEZONE: ${{ vars.RETAIL_TIMEZONE || 'America/Phoenix' }}
           QUIET_OUTPUT: "true"       # public logs: counts only, no names or money
           STORES_ONLY: ${{ inputs.stores || '' }}
+          RETAIL_HISTORY_FROM_YEAR: ${{ inputs.from_year || '2018' }}
         run: python -m sbsync retail ${{ inputs.backfill && '--backfill' || '' }} ${STORES_ONLY:+--stores=$STORES_ONLY}
