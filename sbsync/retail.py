@@ -317,7 +317,7 @@ class RetailSync:
             where = (f"((Store = '{store}') and (Stat_Type = '{stat_type}')) and "
                      f"(Period_Start between '{since:%Y-%m-%d}' and '{until:%Y-%m-%d}')")
         else:
-            where = (f"((Store = '{store}') and (Stat_Type not in ('Inventory', 'Month Total'))) and "
+            where = (f"((Store = '{store}') and (Stat_Type not in ('Inventory', 'Month Total', 'Month Compare'))) and "
                      f"(Period_Start between '{since:%Y-%m-%d}' and '{until:%Y-%m-%d}')")
         cols = "id, Stat_Key, Period_Start, Dutchie_Product_ID, " + ", ".join(MONEY_FIELDS + COUNT_FIELDS + DECIMAL_FIELDS)
         return {r["Stat_Key"]: r for r in self.z.coql_all(cols, MODULE, where=where) if r.get("Stat_Key")}
@@ -515,6 +515,28 @@ class RetailSync:
                 month = _add_months(month, 1)
             have = self.existing(store, first_month, today, stat_type="Month Total")
             c, u = self.write(code, store, rows, have)
+            new_total += c
+            upd_total += u
+            # "Month Compare": for each month, that month and each of the 3 before it as separate
+            # rows dated to the month itself, so a dashboard filtered to one month can show all
+            # four with their real month names (e.g. "2026-08 Aug" ... "2026-11 Nov")
+            compare = {}
+            for (_, period, _, _, mf) in rows.values():
+                for k in (3, 2, 1, 0):
+                    pm = _add_months(period, -k)
+                    if k == 0:
+                        vals = mf
+                    else:
+                        p = _month_sum(days, pm)
+                        if p["_days"] < 0.9 * _days_in_month(pm):
+                            continue  # month missing or only partly in the history
+                        vals = {"Net_Sales": round(p["Net_Sales"], 2), "Transactions": int(round(p["Transactions"])),
+                                "New_Customers": int(round(p["New_Customers"])),
+                                "Avg_Basket": round(p["Net_Sales"] / p["Transactions"], 2) if p["Transactions"] else 0}
+                    f = {k2: vals.get(k2) for k2 in ("Net_Sales", "Transactions", "Avg_Basket", "New_Customers")}
+                    compare[f"Month Compare|{period}|{k}"] = ("Month Compare", period, f"{pm:%Y-%m %b}", {}, f)
+            have = self.existing(store, first_month, today, stat_type="Month Compare")
+            c, u = self.write(code, store, compare, have)
             new_total += c
             upd_total += u
         self.report.add("Retail stats", "written" if new_total or upd_total else "unchanged",
