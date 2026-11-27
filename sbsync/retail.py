@@ -29,7 +29,20 @@ MONEY_FIELDS = ("Net_Sales", "Gross_Sales", "Discounts", "Returns", "Tax", "Cost
                 "Medical_Sales", "Rec_Sales", "Inventory_Value", "Prev_3M_Net_Sales", "Prev_3M_Avg_Basket")
 COUNT_FIELDS = ("Transactions", "Customers", "New_Customers", "In_Store_Sales", "Pickup_Sales",
                 "Delivery_Sales", "Days_Since_Last_Sale", "Days_In_Period", "Prev_3M_Transactions",
-                "Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
+                "Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct",
+                "Net_Sales_1_Month_Ago", "Net_Sales_2_Months_Ago", "Net_Sales_3_Months_Ago",
+                "Orders_1_Month_Ago", "Orders_2_Months_Ago", "Orders_3_Months_Ago", "Projected_Orders")
+# Month Total comparison with each of the previous 3 full months, and the month-end projection.
+# Zoho Professional allows only a few currency/decimal fields, so some older fields were relabelled
+# in Zoho and reused (api name -> label):
+#   Prev_3M_Avg_Basket   -> "AOV 1 Month Ago"      Prev_3M_Net_Sales -> "AOV 2 Months Ago"
+#   Inventory_Value      -> "AOV 3 Months Ago"     Prev_3M_Transactions -> "Projected Net Sales" (whole $)
+NET_AGO = ("Net_Sales_1_Month_Ago", "Net_Sales_2_Months_Ago", "Net_Sales_3_Months_Ago")  # whole $
+ORDERS_AGO = ("Orders_1_Month_Ago", "Orders_2_Months_Ago", "Orders_3_Months_Ago")
+AOV_AGO = ("Prev_3M_Avg_Basket", "Prev_3M_Net_Sales", "Inventory_Value")
+PROJECTED_NET = "Prev_3M_Transactions"
+PROJECTED_ORDERS = "Projected_Orders"
+RETIRED = ("Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
 DECIMAL_FIELDS = ("Units", "Qty_On_Hand")
 ALL_STORES = "All Stores"
 # daily fields that add up into a month
@@ -262,7 +275,7 @@ def inventory_rows(inventory, products, today, last_sold):
         name = g(p, "productName", "name", default=None) or f"Product {pid}"
         cat = g(p, "masterCategory", "category", default=None)
         last = last_sold.get(pid)
-        f = {"Qty_On_Hand": round(q, 2), "Inventory_Value": round(value[pid], 2),
+        f = {"Qty_On_Hand": round(q, 2), "Inventory_Value": None,  # field now holds Month Total AOV
              "Days_Since_Last_Sale": (today - last).days if last else None}
         extra = {"Category": cat, "Product_Type": g(p, "category"), "Brand": g(p, "brandName", "brand"),
                  "Dutchie_Product_ID": str(pid)}
@@ -457,26 +470,28 @@ class RetailSync:
                     last_day = max(seen) if seen else today.day
                 cur = _month_sum(days, month, last_day)
                 if cur["_days"]:
-                    window = last_day or _days_in_month(month)
-                    prev = [_month_sum(days, _add_months(month, -k), last_day) for k in (1, 2, 3)]
-                    # a month only counts if it has (nearly) all the days being compared,
-                    # e.g. the first partial month of history is left out
-                    prev = [p for p, k in zip(prev, (1, 2, 3))
-                            if p["_days"] >= 0.9 * min(window, _days_in_month(_add_months(month, -k)))]
                     f = {k: (int(round(cur[k])) if k in COUNT_FIELDS else round(cur[k], 2)) for k in SUMMABLE}
                     f["Avg_Basket"] = round(cur["Net_Sales"] / cur["Transactions"], 2) if cur["Transactions"] else 0
                     f["Days_In_Period"] = cur["_days"]
-                    f.update({k: None for k in ("Prev_3M_Net_Sales", "Prev_3M_Transactions", "Prev_3M_Avg_Basket",
-                                                "Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")})
-                    if prev:
-                        p_net = sum(p["Net_Sales"] for p in prev) / len(prev)
-                        p_tx = sum(p["Transactions"] for p in prev) / len(prev)
-                        p_aov = p_net / p_tx if p_tx else 0
-                        f.update({"Prev_3M_Net_Sales": round(p_net, 2), "Prev_3M_Transactions": round(p_tx),
-                                  "Prev_3M_Avg_Basket": round(p_aov, 2),
-                                  "Net_Sales_vs_3M_Pct": _pct(f["Net_Sales"], p_net),
-                                  "Orders_vs_3M_Pct": _pct(f["Transactions"], p_tx),
-                                  "Avg_Basket_vs_3M_Pct": _pct(f["Avg_Basket"], p_aov)})
+                    f.update({k: None for k in RETIRED})
+                    # each of the previous 3 months in full (left blank when that month is
+                    # missing or only partly in the history, e.g. the first month of data)
+                    for k in (1, 2, 3):
+                        pm = _add_months(month, -k)
+                        p = _month_sum(days, pm)
+                        full = p["_days"] >= 0.9 * _days_in_month(pm)
+                        f[NET_AGO[k - 1]] = int(round(p["Net_Sales"])) if full else None
+                        f[ORDERS_AGO[k - 1]] = int(round(p["Transactions"])) if full else None
+                        f[AOV_AGO[k - 1]] = (round(p["Net_Sales"] / p["Transactions"], 2)
+                                             if full and p["Transactions"] else None)
+                    # month-end projection at this month's daily pace (a finished month is its actual)
+                    base, elapsed = cur, last_day
+                    if last_day and last_day == today.day and today.day > 1:
+                        # today is still trading: project from the finished days only
+                        base, elapsed = _month_sum(days, month, today.day - 1), today.day - 1
+                    scale = _days_in_month(month) / elapsed if elapsed else 1
+                    f[PROJECTED_NET] = int(round(base["Net_Sales"] * scale))
+                    f[PROJECTED_ORDERS] = int(round(base["Transactions"] * scale))
                     label = "month to date" if last_day else "full month"
                     rows[f"Month Total|{month}"] = ("Month Total", month, f"{month:%b %Y} ({label})", {}, f)
                 month = _add_months(month, 1)
