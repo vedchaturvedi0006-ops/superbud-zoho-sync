@@ -9,6 +9,10 @@ on:
         description: "Load ALL sales history (first time only, takes longer)"
         type: boolean
         default: false
+      stores:
+        description: "Only these stores for the sales pull, e.g. downtown,eastside (empty = all)"
+        type: string
+        default: ""
 
 concurrency:
   group: dutchie-retail-stats
@@ -35,7 +39,10 @@ jobs:
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           DUTCHIE_KEY_BENSON: ${{ secrets.DUTCHIE_KEY_BENSON }}
           DUTCHIE_KEY_RIVER: ${{ secrets.DUTCHIE_KEY_RIVER }}
+          DUTCHIE_KEY_DOWNTOWN: ${{ secrets.DUTCHIE_KEY_DOWNTOWN }}
+          DUTCHIE_KEY_EASTSIDE: ${{ secrets.DUTCHIE_KEY_EASTSIDE }}
           LIVE: ${{ vars.LIVE || 'false' }}
           RETAIL_TIMEZONE: ${{ vars.RETAIL_TIMEZONE || 'America/Phoenix' }}
           QUIET_OUTPUT: "true"       # public logs: counts only, no names or money
-        run: python -m sbsync retail ${{ inputs.backfill && '--backfill' || '' }}
+          STORES_ONLY: ${{ inputs.stores || '' }}
+        run: python -m sbsync retail ${{ inputs.backfill && '--backfill' || '' }} ${STORES_ONLY:+--stores=$STORES_ONLY}
