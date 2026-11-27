@@ -179,6 +179,7 @@ class MonthTotalTests(unittest.TestCase):
         self.assertEqual((b["Orders_1_Month_Ago"], b["Prev_3M_Avg_Basket"]), (62, 150.0))   # Oct AOV
         self.assertEqual(b["Prev_3M_Transactions"], 4500)          # projected: 150/day x 30
         self.assertEqual(b["Projected_Orders"], 60)
+        self.assertEqual(b["Net_Sales_vs_3M_Pct"], 0)             # "New Customers 1 Month Ago" (none in data)
         for k in ("Transactions", "Net_Sales_1_Month_Ago", "Orders_1_Month_Ago", "Prev_3M_Transactions"):
             self.assertIsInstance(b[k], int, k)  # Zoho integer fields reject 20.0
         oct_ = mt["benson|Month Total|2026-10-01"]
@@ -285,3 +286,13 @@ class StoreGroupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeverSoldTests(unittest.TestCase):
+    def test_never_sold_counts_from_history_start(self):
+        inv = [{"productId": 1, "quantityAvailable": 5, "unitCost": 2},
+               {"productId": 2, "quantityAvailable": 3, "unitCost": 2}]
+        today = dt.date(2026, 11, 27)
+        rows = retail.inventory_rows(inv, [], today, {1: dt.date(2026, 11, 20)}, dt.date(2026, 6, 26))
+        days = {r[3]["Dutchie_Product_ID"]: r[4]["Days_Since_Last_Sale"] for r in rows.values()}
+        self.assertEqual(days, {"1": 7, "2": 154})
