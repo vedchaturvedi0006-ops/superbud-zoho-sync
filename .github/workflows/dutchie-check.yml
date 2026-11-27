@@ -22,5 +22,7 @@ jobs:
           # Settings -> Secrets and variables -> Actions -> Secrets
           DUTCHIE_KEY_BENSON: ${{ secrets.DUTCHIE_KEY_BENSON }}
           DUTCHIE_KEY_RIVER: ${{ secrets.DUTCHIE_KEY_RIVER }}
+          DUTCHIE_KEY_DOWNTOWN: ${{ secrets.DUTCHIE_KEY_DOWNTOWN }}
+          DUTCHIE_KEY_EASTSIDE: ${{ secrets.DUTCHIE_KEY_EASTSIDE }}
           QUIET_OUTPUT: "true"       # public logs: no names, money or customer data
         run: python -m sbsync dutchie-check
