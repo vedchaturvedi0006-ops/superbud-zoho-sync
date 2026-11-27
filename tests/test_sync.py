@@ -496,3 +496,29 @@ class MappingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenRetryTests(unittest.TestCase):
+    def test_new_token_after_401(self):
+        from unittest import mock
+        from sbsync import zoho as zmod
+        z = zmod.Zoho(live=True)
+        tokens = iter(["t1", "t2"])
+        z._access_token = lambda: z._token or setattr(z, "_token", next(tokens)) or z._token
+
+        class R:
+            def __init__(self, code):
+                self.status_code = code
+                self.text = "{}"
+
+            def json(self):
+                return {"data": [{"ok": 1}]} if self.status_code == 200 else {"code": "INVALID_TOKEN"}
+        calls = []
+
+        def fake(method, url, headers=None, **kw):
+            calls.append(headers["Authorization"])
+            return R(401 if len(calls) == 1 else 200)
+        with mock.patch.object(zmod, "request", fake), mock.patch.object(zmod.time, "sleep", lambda s: None):
+            body = z._call("GET", "/x")
+        self.assertEqual(body, {"data": [{"ok": 1}]})
+        self.assertEqual(calls, ["Zoho-oauthtoken t1", "Zoho-oauthtoken t2"])
