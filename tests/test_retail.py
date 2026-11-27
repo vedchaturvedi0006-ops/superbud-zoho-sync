@@ -121,7 +121,7 @@ class RetailTests(unittest.TestCase):
         cats = [v[4] for k, v in rows.items() if k.startswith("Category|") and k.endswith("|Edibles")]
         self.assertEqual((sum(c["Net_Sales"] for c in cats), sum(c["Units"] for c in cats)), (60.0, 3.0))
         self.assertTrue(all(v[1].day != 1 for k, v in rows.items() if k.startswith("Category|")))  # per day
-        prod = [v for k, v in rows.items() if k.startswith("Product|") and k.endswith("|1")][0]
+        prod = rows["Product|2026-11-01|1"]                                  # products stay monthly
         self.assertEqual(prod[2], "Blue Dream 3.5g")
         self.assertEqual(prod[3]["Product_Type"], "Eighths")
         self.assertTrue(any(k.startswith("Budtender|2026-11-") and k.endswith("|Alex Budtender") for k in rows))
