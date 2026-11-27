@@ -215,6 +215,19 @@ class PartialHistoryTests(unittest.TestCase):
         self.assertEqual((aug["Days_In_Period"], aug["Net_Sales_1_Month_Ago"], aug["Prev_3M_Transactions"]),
                          (10, 3100, 3720))   # July in full; 120/day x 31
 
+    def test_closed_day_counts_as_passed(self):
+        z, rep = FakeZoho(), Report()
+        rs = retail.RetailSync(z, rep)
+        for dd in range(1, 11):
+            if dd == 5:
+                continue                  # store closed on the 5th
+            k = f"s|{dd}"
+            z.rows[k] = {"id": k, "Stat_Key": k, "Store": "S", "Stat_Type": "Daily Total",
+                         "Period_Start": f"2026-11-{dd:02d}", "Net_Sales": 100, "Transactions": 1}
+        rs.month_totals({"S": "s"}, dt.date(2026, 11, 1), dt.date(2026, 11, 11))
+        nov = [r for r in z.rows.values() if r.get("Stat_Key") == "s|Month Total|2026-11-01"][0]
+        self.assertEqual(nov["Prev_3M_Transactions"], 2700)   # 900 over 10 days passed -> 90/day x 30
+
 
 class MonthBoundaryTests(unittest.TestCase):
     def test_late_evening_sale_stays_in_its_local_month(self):
