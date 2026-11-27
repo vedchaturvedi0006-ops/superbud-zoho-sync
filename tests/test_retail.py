@@ -45,7 +45,7 @@ class FakeZoho:
         for r in self.rows.values():
             if st and r["Stat_Type"] != st.group(1):
                 continue
-            if not st and r["Stat_Type"] in ("Inventory", "Month Total"):
+            if not st and r["Stat_Type"] in ("Inventory", "Month Total", "Month Compare"):
                 continue
             if store and r.get("Store") != store.group(1).replace("''", "'"):
                 continue
@@ -180,6 +180,13 @@ class MonthTotalTests(unittest.TestCase):
         self.assertEqual(b["Prev_3M_Transactions"], 4500)          # projected: 150/day x 30
         self.assertEqual(b["Projected_Orders"], 60)
         self.assertEqual(b["Net_Sales_vs_3M_Pct"], 0)             # "New Customers 1 Month Ago" (none in data)
+        cmp_ = {r["Dimension"]: r for r in z.rows.values()
+                if r.get("Stat_Type") == "Month Compare" and r["Store"] == "Earth's Healing - Benson"
+                and r["Period_Start"] == "2026-11-01"}
+        self.assertEqual(sorted(cmp_), ["2026-08 Aug", "2026-09 Sep", "2026-10 Oct", "2026-11 Nov"])
+        self.assertEqual((cmp_["2026-10 Oct"]["Net_Sales"], cmp_["2026-10 Oct"]["Transactions"],
+                          cmp_["2026-10 Oct"]["Avg_Basket"]), (9300, 62, 150.0))
+        self.assertEqual(cmp_["2026-11 Nov"]["Net_Sales"], 1515)
         for k in ("Transactions", "Net_Sales_1_Month_Ago", "Orders_1_Month_Ago", "Prev_3M_Transactions"):
             self.assertIsInstance(b[k], int, k)  # Zoho integer fields reject 20.0
         oct_ = mt["benson|Month Total|2026-10-01"]
