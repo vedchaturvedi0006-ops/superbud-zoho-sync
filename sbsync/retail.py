@@ -486,9 +486,13 @@ class RetailSync:
                                              if full and p["Transactions"] else None)
                     # month-end projection at this month's daily pace (a finished month is its actual)
                     base, elapsed = cur, last_day
-                    if last_day and last_day == today.day and today.day > 1:
-                        # today is still trading: project from the finished days only
-                        base, elapsed = _month_sum(days, month, today.day - 1), today.day - 1
+                    if last_day:
+                        # pace over the calendar days already finished (a closed day such as a
+                        # holiday still counts as passed); today is still trading so it is left out
+                        if today.day > 1:
+                            base, elapsed = _month_sum(days, month, today.day - 1), today.day - 1
+                        else:
+                            elapsed = 1
                     scale = _days_in_month(month) / elapsed if elapsed else 1
                     f[PROJECTED_NET] = int(round(base["Net_Sales"] * scale))
                     f[PROJECTED_ORDERS] = int(round(base["Transactions"] * scale))
