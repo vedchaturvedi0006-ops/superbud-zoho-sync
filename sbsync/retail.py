@@ -42,7 +42,8 @@ ORDERS_AGO = ("Orders_1_Month_Ago", "Orders_2_Months_Ago", "Orders_3_Months_Ago"
 AOV_AGO = ("Prev_3M_Avg_Basket", "Prev_3M_Net_Sales", "Inventory_Value")
 PROJECTED_NET = "Prev_3M_Transactions"
 PROJECTED_ORDERS = "Projected_Orders"
-RETIRED = ("Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
+# relabelled in Zoho: "New Customers 1 / 2 / 3 Months Ago"
+NEW_CUST_AGO = ("Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
 DECIMAL_FIELDS = ("Units", "Qty_On_Hand")
 ALL_STORES = "All Stores"
 # daily fields that add up into a month
@@ -259,7 +260,7 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
     return rows, last_sold
 
 
-def inventory_rows(inventory, products, today, last_sold):
+def inventory_rows(inventory, products, today, last_sold, history_start=None):
     prod_by_id = {g(p, "productId", "id"): p for p in products}
     qty = defaultdict(float)
     value = defaultdict(float)
@@ -276,7 +277,8 @@ def inventory_rows(inventory, products, today, last_sold):
         cat = g(p, "masterCategory", "category", default=None)
         last = last_sold.get(pid)
         f = {"Qty_On_Hand": round(q, 2), "Inventory_Value": None,  # field now holds Month Total AOV
-             "Days_Since_Last_Sale": (today - last).days if last else None}
+             # never sold since the sales history begins: count from the start of the history
+             "Days_Since_Last_Sale": (today - (last or history_start)).days if (last or history_start) else None}
         extra = {"Category": cat, "Product_Type": g(p, "category"), "Brand": g(p, "brandName", "brand"),
                  "Dutchie_Product_ID": str(pid)}
         rows[f"Inventory|{pid}"] = ("Inventory", today, name, extra, f)
@@ -405,7 +407,7 @@ class RetailSync:
                     for key in (pid, _int_or_none(pid)):
                         if key is not None and key not in last_sold:
                             last_sold[key] = prev
-            inv = inventory_rows(client.inventory(), products, today, last_sold)
+            inv = inventory_rows(client.inventory(), products, today, last_sold, self.first_sale_day(label))
             c, u = self.write(code, label, inv, have_inv)
             new_total += c
             upd_total += u
@@ -414,6 +416,18 @@ class RetailSync:
         outcome = "written" if new_total or upd_total else "unchanged"
         self.report.add("Retail stats", outcome, f"{label}: {new_total} new, {upd_total} updated rows")
         return new_total, upd_total
+
+    def first_sale_day(self, store_label):
+        """First day of sales history held in Zoho for a store (None if unknown)."""
+        s = store_label.replace("'", "''")
+        try:
+            body = self.z._call("POST", "/coql", json={"select_query": (
+                f"select Period_Start from {MODULE} where (Store = '{s}') and (Stat_Type = 'Daily Total') "
+                f"order by Period_Start asc limit 1")})
+        except (ApiError, AttributeError):
+            return None
+        rows = body.get("data") or []
+        return dt.date.fromisoformat(str(rows[0]["Period_Start"])[:10]) if rows else None
 
     # -------------------------------------------------------------- month totals --
     def daily_rows(self, since, until):
@@ -473,7 +487,6 @@ class RetailSync:
                     f = {k: (int(round(cur[k])) if k in COUNT_FIELDS else round(cur[k], 2)) for k in SUMMABLE}
                     f["Avg_Basket"] = round(cur["Net_Sales"] / cur["Transactions"], 2) if cur["Transactions"] else 0
                     f["Days_In_Period"] = cur["_days"]
-                    f.update({k: None for k in RETIRED})
                     # each of the previous 3 months in full (left blank when that month is
                     # missing or only partly in the history, e.g. the first month of data)
                     for k in (1, 2, 3):
@@ -484,6 +497,7 @@ class RetailSync:
                         f[ORDERS_AGO[k - 1]] = int(round(p["Transactions"])) if full else None
                         f[AOV_AGO[k - 1]] = (round(p["Net_Sales"] / p["Transactions"], 2)
                                              if full and p["Transactions"] else None)
+                        f[NEW_CUST_AGO[k - 1]] = int(round(p["New_Customers"])) if full else None
                     # month-end projection at this month's daily pace (a finished month is its actual)
                     base, elapsed = cur, last_day
                     if last_day:
