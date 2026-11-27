@@ -46,8 +46,8 @@ PROJECTED_ORDERS = "Projected_Orders"
 NEW_CUST_AGO = ("Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
 DECIMAL_FIELDS = ("Units", "Qty_On_Hand")
 ALL_STORES = "All Stores"
-# category / budtender / hour rows are per day (products per month); a detail row that is no
-# longer produced for its period (e.g. after switching between monthly and daily) is deleted
+# product / category / budtender / hour rows are per month; a detail row no longer produced for
+# its month (e.g. a leftover per-day row) is deleted rather than zeroed (fewer API credits)
 DETAIL_TYPES = ("Category", "Product", "Budtender", "Hour")
 # daily fields that add up into a month
 SUMMABLE = ("Net_Sales", "Gross_Sales", "Discounts", "Returns", "Tax", "Cost", "Margin", "Medical_Sales",
@@ -179,8 +179,7 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
             g(tx, "employeeName", "completedByUser", default="Unknown")
         medical = is_medical(tx, customers)
         chan = channel(tx)
-        # detail rows are per day so dashboards can be filtered to any date range
-        hour_key = (day, f"{WEEKDAYS[when.weekday()]} {when.hour:02d}:00", when.weekday(), when.hour)
+        hour_key = (month, f"{WEEKDAYS[when.weekday()]} {when.hour:02d}:00", when.weekday(), when.hour)
 
         tx_net = 0.0
         items = g(tx, "items", default=[]) or []
@@ -204,8 +203,7 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
                                  g(p, "category", default=None))
             if not returning:
                 last_sold[pid] = max(last_sold.get(pid, day), day)
-            # products stay monthly: a row per product per day would exceed Zoho's daily API allowance
-            for bucket in (category[(day, cat)], product[(month, pid)]):
+            for bucket in (category[(month, cat)], product[(month, pid)]):
                 bucket.net += net
                 bucket.gross += gross
                 bucket.disc += disc
@@ -214,7 +212,7 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
                 bucket.tx.add(tid)
                 if cid:
                     bucket.cust.add(cid)
-            for bucket in (daily[day], staff[(day, emp_name)], hourly[hour_key]):
+            for bucket in (daily[day], staff[(month, emp_name)], hourly[hour_key]):
                 bucket.units += qty
                 bucket.cost += cost
 
@@ -223,7 +221,7 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
         tx_gross = sign * abs(num(g(tx, "subtotal", default=tx_net)))
         tx_disc = sign * abs(num(g(tx, "totalDiscount")))
         tx_tax = sign * abs(num(g(tx, "tax", "totalTax")))
-        for bucket in (daily[day], staff[(day, emp_name)], hourly[hour_key]):
+        for bucket in (daily[day], staff[(month, emp_name)], hourly[hour_key]):
             bucket.net += tx_net
             bucket.gross += tx_gross
             bucket.disc += tx_disc
@@ -251,16 +249,16 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
                   "In_Store_Sales": len(t.chan["In_Store_Sales"]), "Pickup_Sales": len(t.chan["Pickup_Sales"]),
                   "Delivery_Sales": len(t.chan["Delivery_Sales"])})
         rows[f"Daily Total|{day}"] = ("Daily Total", day, "All sales", {}, f)
-    for (day, cat), t in category.items():
-        rows[f"Category|{day}|{cat}"] = ("Category", day, cat, {"Category": cat}, t.fields())
+    for (month, cat), t in category.items():
+        rows[f"Category|{month}|{cat}"] = ("Category", month, cat, {"Category": cat}, t.fields())
     for (month, pid), t in product.items():
         name, brand, cat, ptype = product_info.get(pid, (f"Product {pid}", None, None, None))
         extra = {"Category": cat, "Product_Type": ptype, "Brand": brand, "Dutchie_Product_ID": str(pid)}
         rows[f"Product|{month}|{pid}"] = ("Product", month, name, extra, t.fields())
-    for (day, emp), t in staff.items():
-        rows[f"Budtender|{day}|{emp}"] = ("Budtender", day, emp, {}, t.fields())
-    for (day, label, wd, hour), t in hourly.items():
-        rows[f"Hour|{day}|{label}"] = ("Hour", day, label, {"Weekday": WEEKDAYS[wd], "Hour_of_Day": hour},
+    for (month, emp), t in staff.items():
+        rows[f"Budtender|{month}|{emp}"] = ("Budtender", month, emp, {}, t.fields())
+    for (month, label, wd, hour), t in hourly.items():
+        rows[f"Hour|{month}|{label}"] = ("Hour", month, label, {"Weekday": WEEKDAYS[wd], "Hour_of_Day": hour},
                                          t.fields())
     return rows, last_sold
 
@@ -349,7 +347,7 @@ class RetailSync:
         stale = []
         for key, old in have.items():
             if key.split("|")[1:2] and key.split("|")[1] in DETAIL_TYPES:
-                stale.append(old["id"])  # e.g. an old month-level row now replaced by daily rows
+                stale.append(old["id"])
                 continue
             zero = {k: 0 for k in MONEY_FIELDS + COUNT_FIELDS + DECIMAL_FIELDS if old.get(k)}
             if zero:
@@ -529,44 +527,24 @@ class RetailSync:
             c, u = self.write(code, store, rows, have)
             new_total += c
             upd_total += u
-            # "Month Compare": for every day, its month (to date) and each of the 3 months before
-            # it, as rows dated to that day. Charts use the MAX of each month label, so whatever
-            # dates the dashboard is filtered to, each bar shows that month's total up to the
-            # latest selected day (previous months in full), with real month names
-            # ("2026-08 Aug" ... "2026-11 Nov"). The month-end projection sits on the month's
-            # latest day only, so it can be summed.
-            def full_month(pm):
-                p = _month_sum(days, pm)
-                if p["_days"] < 0.9 * _days_in_month(pm):
-                    return None  # month missing or only partly in the history
-                return _compare_fields(p)
-            prev_cache = {}
+            # "Month Compare": for each month, that month and each of the 3 before it as separate
+            # rows dated to the month itself, so a dashboard filtered to one month can show all
+            # four with their real month names (e.g. "2026-08 Aug" ... "2026-11 Nov")
             compare = {}
             for (_, period, _, _, mf) in rows.values():
-                prev = {k: prev_cache.setdefault(_add_months(period, -k), full_month(_add_months(period, -k)))
-                        for k in (1, 2, 3)}
-                last = min(today, _add_months(period, 1) - dt.timedelta(days=1))
-                running = _month_sum(days, period, 0)
-                day = period
-                while day <= last:
-                    r = days.get(day)
-                    if r:
-                        for f2 in SUMMABLE:
-                            running[f2] += num(r.get(f2))
-                        running["_days"] += 1
-                    cur = _compare_fields(running)
-                    if day == last:
-                        cur["Prev_3M_Transactions"] = mf.get(PROJECTED_NET)
-                        cur["Projected_Orders"] = mf.get(PROJECTED_ORDERS)
+                for k in (3, 2, 1, 0):
+                    pm = _add_months(period, -k)
+                    if k == 0:
+                        vals = mf
                     else:
-                        cur["Prev_3M_Transactions"] = cur["Projected_Orders"] = None
-                    compare[f"Month Compare|{day}|0"] = ("Month Compare", day, f"{period:%Y-%m %b}", {}, cur)
-                    for k, vals in prev.items():
-                        if vals:
-                            pm = _add_months(period, -k)
-                            compare[f"Month Compare|{day}|{k}"] = ("Month Compare", day, f"{pm:%Y-%m %b}", {},
-                                                                    dict(vals))
-                    day += dt.timedelta(days=1)
+                        p = _month_sum(days, pm)
+                        if p["_days"] < 0.9 * _days_in_month(pm):
+                            continue  # month missing or only partly in the history
+                        vals = {"Net_Sales": round(p["Net_Sales"], 2), "Transactions": int(round(p["Transactions"])),
+                                "New_Customers": int(round(p["New_Customers"])),
+                                "Avg_Basket": round(p["Net_Sales"] / p["Transactions"], 2) if p["Transactions"] else 0}
+                    f = {k2: vals.get(k2) for k2 in ("Net_Sales", "Transactions", "Avg_Basket", "New_Customers")}
+                    compare[f"Month Compare|{period}|{k}"] = ("Month Compare", period, f"{pm:%Y-%m %b}", {}, f)
             have = self.existing(store, first_month, today, stat_type="Month Compare")
             c, u = self.write(code, store, compare, have)
             new_total += c
@@ -610,14 +588,6 @@ def _month_sum(days, month, last_day=None):
             for k in SUMMABLE:
                 out[k] += num(r.get(k))
     return out
-
-
-def _compare_fields(t):
-    """Net sales, orders, AOV and new customers of a running/whole-month total."""
-    tx = t["Transactions"]
-    return {"Net_Sales": round(t["Net_Sales"], 2), "Transactions": int(round(tx)),
-            "New_Customers": int(round(t["New_Customers"])),
-            "Avg_Basket": round(t["Net_Sales"] / tx, 2) if tx else 0}
 
 
 def _pct(cur, base):

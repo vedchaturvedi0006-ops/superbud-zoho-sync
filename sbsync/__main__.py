@@ -237,14 +237,8 @@ def cmd_retail(backfill, only=None):
             report.add("Retail stats", "error", f"{label}: {exc}", code=_safe_code(exc))
     try:
         today = now.astimezone(rs.tz).date()
-        # built from the daily rows already in Zoho: a backfill redoes every month, a regular
-        # run the last few (enough for this month, last month and late edits)
+        # cheap (built from the daily rows already in Zoho), so always redo all months
         first = dt.date(int(config.get("RETAIL_HISTORY_FROM_YEAR", "2018")), 1, 1)
-        if not backfill:
-            m = today.replace(day=1)
-            for _ in range(2):
-                m = (m - dt.timedelta(days=1)).replace(day=1)
-            first = max(first, m)
         rs.month_totals({label: code for code, label, _ in stores}, first, today)
     except ApiError as exc:
         report.add("Retail stats", "error", f"month totals: {exc}", code=_safe_code(exc))
