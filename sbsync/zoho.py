@@ -114,6 +114,15 @@ class Zoho:
             results.extend(body.get("data", []))
         return results
 
+    def delete(self, module, ids):
+        """Delete up to 100 records by id."""
+        ids = [str(i) for i in ids][:100]
+        self.writes.append({"action": "delete", "module": module, "record": {"ids": len(ids)}})
+        if not self.live or not ids:
+            return []
+        body = self._call("DELETE", f"/{module}", params={"ids": ",".join(ids)})
+        return body.get("data", [])
+
     def create(self, module, records):
         return self._write("POST", module, records, "create")
 
