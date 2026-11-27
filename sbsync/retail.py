@@ -46,7 +46,8 @@ PROJECTED_ORDERS = "Projected_Orders"
 NEW_CUST_AGO = ("Net_Sales_vs_3M_Pct", "Orders_vs_3M_Pct", "Avg_Basket_vs_3M_Pct")
 DECIMAL_FIELDS = ("Units", "Qty_On_Hand")
 ALL_STORES = "All Stores"
-# per-product / category / budtender / hour rows: one per day; a row no longer produced is deleted
+# category / budtender / hour rows are per day (products per month); a detail row that is no
+# longer produced for its period (e.g. after switching between monthly and daily) is deleted
 DETAIL_TYPES = ("Category", "Product", "Budtender", "Hour")
 # daily fields that add up into a month
 SUMMABLE = ("Net_Sales", "Gross_Sales", "Discounts", "Returns", "Tax", "Cost", "Margin", "Medical_Sales",
@@ -168,6 +169,7 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
         if when is None:
             continue
         day = when.date()
+        month = day.replace(day=1)
         tid = g(tx, "transactionId", "id")
         cid = g(tx, "customerId")
         returning = bool(g(tx, "isReturn", default=False))
@@ -202,7 +204,8 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
                                  g(p, "category", default=None))
             if not returning:
                 last_sold[pid] = max(last_sold.get(pid, day), day)
-            for bucket in (category[(day, cat)], product[(day, pid)]):
+            # products stay monthly: a row per product per day would exceed Zoho's daily API allowance
+            for bucket in (category[(day, cat)], product[(month, pid)]):
                 bucket.net += net
                 bucket.gross += gross
                 bucket.disc += disc
@@ -250,10 +253,10 @@ def aggregate(transactions, products, employees, customers, tz, first_purchase=N
         rows[f"Daily Total|{day}"] = ("Daily Total", day, "All sales", {}, f)
     for (day, cat), t in category.items():
         rows[f"Category|{day}|{cat}"] = ("Category", day, cat, {"Category": cat}, t.fields())
-    for (day, pid), t in product.items():
+    for (month, pid), t in product.items():
         name, brand, cat, ptype = product_info.get(pid, (f"Product {pid}", None, None, None))
         extra = {"Category": cat, "Product_Type": ptype, "Brand": brand, "Dutchie_Product_ID": str(pid)}
-        rows[f"Product|{day}|{pid}"] = ("Product", day, name, extra, t.fields())
+        rows[f"Product|{month}|{pid}"] = ("Product", month, name, extra, t.fields())
     for (day, emp), t in staff.items():
         rows[f"Budtender|{day}|{emp}"] = ("Budtender", day, emp, {}, t.fields())
     for (day, label, wd, hour), t in hourly.items():
